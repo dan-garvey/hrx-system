@@ -47,7 +47,7 @@ low.func.def target<amdgpu.rdna3.core>(@target) @dispatch_ptr_lifetime_releases_
 
 amdgpu.target<gfx1100> @target
 
-low.kernel.def target<amdgpu.rdna3.core>(@target) abi_layout({constant_count = 0, direct_arg_count = 0, direct_arg_names = {}, direct_arg_offsets = [], direct_arg_parameter_indices = [], direct_arg_sizes = [], parameter_count = 2, resource_count = 2, resource_offsets = [0, 8], resource_parameter_indices = [0, 1], uses_kernarg_segment_ptr = true}) workgroup_size(64, 1, 1) @materialized_pair_descriptor_survives_exec_tail_backedge() {
+low.kernel.def target<amdgpu.rdna3.core>(@target) abi_layout({constant_count = 0, direct_arg_count = 0, direct_arg_names = {}, direct_arg_offsets = [], direct_arg_parameter_indices = [], direct_arg_sizes = [], kernarg_preload_dword_count = 0, kernarg_preload_dword_offset = 0, parameter_count = 2, resource_count = 2, resource_offsets = [0, 8], resource_parameter_indices = [0, 1], uses_kernarg_segment_ptr = true}) workgroup_size(64, 1, 1) @materialized_pair_descriptor_survives_exec_tail_backedge() {
   %kernarg = low.live_in<amdgpu.kernarg_segment_ptr> : reg<amdgpu.sgpr x2>
   %blocker = low.live_in<amdgpu.dispatch_ptr> : reg<amdgpu.sgpr x2>
   %lane = low.live_in<amdgpu.workitem_id.x> : reg<amdgpu.vgpr>

@@ -809,6 +809,7 @@ loom_cc_library(
     deps = [
         ":symbolic_expr",
         "//loom/src/loom/ir",
+        "//loom/src/loom/ops/buffer",
         "//loom/src/loom/ops/index",
         "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/scf",
@@ -908,6 +909,7 @@ loom_cc_test(
         ":symbolic_expr_test_fixture",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
+        "//loom/src/loom/ops/buffer",
         "//loom/src/loom/ops/index",
         "//loom/src/loom/ops/kernel",
         "//loom/src/loom/ops/scalar",

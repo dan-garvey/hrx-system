@@ -85,6 +85,10 @@ typedef struct loom_amdgpu_kernel_descriptor_t {
   uint32_t next_free_vgpr;
   // Total user SGPR count encoded in COMPUTE_PGM_RSRC2.
   uint32_t user_sgpr_count;
+  // Number of consecutive kernarg dwords preloaded after enabled user SGPRs.
+  uint32_t kernarg_preload_dword_count;
+  // First kernarg dword copied by compatible command-processor firmware.
+  uint32_t kernarg_preload_dword_offset;
   // Descriptor flags controlling AMDHSA setup and code properties.
   loom_amdgpu_kernel_descriptor_flags_t flags;
 } loom_amdgpu_kernel_descriptor_t;

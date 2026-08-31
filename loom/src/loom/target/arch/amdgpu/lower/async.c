@@ -47,6 +47,8 @@ typedef struct loom_amdgpu_async_gather_diagnostic_t {
   loom_amdgpu_async_gather_rejection_flags_t rejection_bits;
   // Source memory planning diagnostics when source view decomposition fails.
   loom_low_source_memory_access_diagnostic_t source_diagnostic;
+  // Destination memory planning diagnostics when LDS decomposition fails.
+  loom_low_source_memory_access_diagnostic_t dest_diagnostic;
   // Source address planning diagnostics when target address selection fails.
   loom_amdgpu_memory_access_diagnostic_t memory_diagnostic;
 } loom_amdgpu_async_gather_diagnostic_t;
@@ -68,6 +70,8 @@ typedef struct loom_amdgpu_async_wait_diagnostic_t {
 typedef struct loom_amdgpu_async_gather_selection_t {
   // Source global-like view access transferred into LDS.
   loom_low_source_memory_access_plan_t source;
+  // Collective destination workgroup view written by the async packet.
+  loom_low_source_memory_access_plan_t dest;
   // Target operand path selected for each source dynamic address term.
   loom_amdgpu_memory_dynamic_index_kind_t
       source_dynamic_term_kinds[LOOM_LOW_SOURCE_MEMORY_DYNAMIC_TERM_CAPACITY];
@@ -280,19 +284,21 @@ static bool loom_amdgpu_async_gather_select_source(
 }
 
 static bool loom_amdgpu_async_gather_select_dest(
-    const loom_value_fact_table_t* fact_table,
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    const loom_view_region_table_t* view_regions,
     const loom_amdgpu_source_alloca_layout_t* alloca_layout,
     loom_value_id_t dest_view, loom_amdgpu_async_gather_selection_t* selection,
     loom_amdgpu_async_gather_diagnostic_t* diagnostic) {
-  loom_value_fact_view_reference_t dest_reference = {0};
-  if (!loom_value_facts_query_view_reference(
-          &fact_table->context,
-          loom_value_fact_table_lookup(fact_table, dest_view),
-          &dest_reference)) {
+  const loom_vector_memory_cache_policy_t no_cache_policy = {0};
+  if (!loom_low_source_memory_access_plan_build_view_with_view_regions(
+          module, fact_table, view_regions,
+          LOOM_LOW_SOURCE_MEMORY_OPERATION_STORE, dest_view, no_cache_policy,
+          &selection->dest, &diagnostic->dest_diagnostic)) {
     diagnostic->rejection_bits |= LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_VIEW;
     return false;
   }
-  if (dest_reference.memory_space != LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP) {
+  if (selection->dest.memory_space !=
+      LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP) {
     diagnostic->rejection_bits |=
         LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_MEMORY_SPACE;
     return false;
@@ -300,21 +306,20 @@ static bool loom_amdgpu_async_gather_select_dest(
   uint64_t lds_root_byte_offset = 0;
   if (!loom_amdgpu_source_alloca_layout_lookup_root(
           alloca_layout, LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP,
-          dest_reference.root_value_id, &lds_root_byte_offset)) {
+          selection->dest.root_value_id, &lds_root_byte_offset)) {
     diagnostic->rejection_bits |=
         LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_SLOT_BASE;
     return false;
   }
 
-  int64_t dest_byte_offset = 0;
-  if (!loom_amdgpu_async_exact_i64(dest_reference.base_byte_offset,
-                                   &dest_byte_offset) ||
-      dest_byte_offset < 0) {
+  if (selection->dest.dynamic_term_count != 0 ||
+      selection->dest.static_byte_offset < 0) {
     diagnostic->rejection_bits |=
         LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_OFFSET;
     return false;
   }
-  const uint64_t view_byte_offset = (uint64_t)dest_byte_offset;
+  const uint64_t view_byte_offset =
+      (uint64_t)selection->dest.static_byte_offset;
   if (lds_root_byte_offset > UINT32_MAX ||
       view_byte_offset > UINT32_MAX - lds_root_byte_offset) {
     diagnostic->rejection_bits |=
@@ -359,9 +364,9 @@ static bool loom_amdgpu_async_gather_select(
           module, fact_table, descriptor_set, view_regions,
           out_selection->source_view, cache_policy, out_selection,
           out_diagnostic, &descriptor_ordinal) ||
-      !loom_amdgpu_async_gather_select_dest(fact_table, alloca_layout,
-                                            out_selection->dest_view,
-                                            out_selection, out_diagnostic)) {
+      !loom_amdgpu_async_gather_select_dest(
+          module, fact_table, view_regions, alloca_layout,
+          out_selection->dest_view, out_selection, out_diagnostic)) {
     return false;
   }
 
@@ -418,6 +423,7 @@ static iree_status_t loom_amdgpu_async_gather_resolve_selection(
     loom_amdgpu_async_gather_plan_t* out_plan) {
   *out_plan = (loom_amdgpu_async_gather_plan_t){
       .source = selection->source,
+      .dest = selection->dest,
       .dest_byte_offset = selection->dest_byte_offset,
       .source_immediate_offset = selection->source_immediate_offset,
       .packet_byte_count = selection->packet_byte_count,
@@ -1053,6 +1059,12 @@ iree_status_t loom_amdgpu_lower_kernel_async_gather(
       loom_make_named_attr_slice(attrs, attr_count),
       /*result_types=*/NULL, /*result_count=*/0, /*tied_results=*/NULL,
       /*tied_result_count=*/0, source_op->location, &low_op));
+  // The packet has a global-read and a workgroup-write dependency effect.
+  // Preserve the collective destination footprint so disjoint LDS transfers
+  // can remain outstanding while later reads still wait for their producer.
+  IREE_RETURN_IF_ERROR(loom_low_lower_record_source_memory_access(
+      context, low_op, &plan->dest,
+      LOOM_LOW_LOWER_MEMORY_ACCESS_RECORD_PRESERVE));
   return loom_low_lower_elide_value(context,
                                     loom_kernel_async_gather_token(source_op));
 }

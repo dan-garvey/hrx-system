@@ -47,6 +47,69 @@ extern "C" {
 #define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_SEGMENT_PTR_SOURCE_ID \
   UINT64_C(0x7C8A03858206FDDC)
 
+// Stable low.live_in source spellings for consecutive CP-preloaded kernarg
+// dword pairs. The hardware preload is contiguous, but pair-sized compiler
+// values preserve the natural alignment of the 64-bit resource pointers when
+// the user-SGPR block begins after the retained kernarg segment pointer.
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_0_SOURCE \
+  "amdgpu.kernarg_preload.dword0"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_2_SOURCE \
+  "amdgpu.kernarg_preload.dword2"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_4_SOURCE \
+  "amdgpu.kernarg_preload.dword4"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_6_SOURCE \
+  "amdgpu.kernarg_preload.dword6"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_8_SOURCE \
+  "amdgpu.kernarg_preload.dword8"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_10_SOURCE \
+  "amdgpu.kernarg_preload.dword10"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_12_SOURCE \
+  "amdgpu.kernarg_preload.dword12"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_14_SOURCE \
+  "amdgpu.kernarg_preload.dword14"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_16_SOURCE \
+  "amdgpu.kernarg_preload.dword16"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_18_SOURCE \
+  "amdgpu.kernarg_preload.dword18"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_20_SOURCE \
+  "amdgpu.kernarg_preload.dword20"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_22_SOURCE \
+  "amdgpu.kernarg_preload.dword22"
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_24_SOURCE \
+  "amdgpu.kernarg_preload.dword24"
+
+// Stable low.live_in source IDs for CP-preloaded kernarg dword pairs.
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_0_SOURCE_ID \
+  UINT64_C(0x7DA1D0A9217D66B1)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_2_SOURCE_ID \
+  UINT64_C(0x7DA1CEA9217D634B)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_4_SOURCE_ID \
+  UINT64_C(0x7DA1D4A9217D6D7D)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_6_SOURCE_ID \
+  UINT64_C(0x7DA1D2A9217D6A17)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_8_SOURCE_ID \
+  UINT64_C(0x7DA1C8A9217D5919)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_10_SOURCE_ID \
+  UINT64_C(0x7758AA63E8124A0A)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_12_SOURCE_ID \
+  UINT64_C(0x7758A863E81246A4)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_14_SOURCE_ID \
+  UINT64_C(0x7758A663E812433E)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_16_SOURCE_ID \
+  UINT64_C(0x7758A463E8123FD8)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_18_SOURCE_ID \
+  UINT64_C(0x7758A263E8123C72)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_20_SOURCE_ID \
+  UINT64_C(0x7755A463E8100A01)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_22_SOURCE_ID \
+  UINT64_C(0x7755A263E810069B)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_24_SOURCE_ID \
+  UINT64_C(0x7755A863E81010CD)
+
+// Maximum number of contiguous 64-bit resource pointers supported by the
+// compatibility preload entry.
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_PAIR_COUNT_MAX 13u
+
 // Stable low.live_in source spelling for the AMDGPU dispatch packet pointer.
 #define LOOM_AMDGPU_HAL_KERNEL_ABI_DISPATCH_PTR_SOURCE "amdgpu.dispatch_ptr"
 
@@ -240,12 +303,25 @@ typedef enum loom_amdgpu_hal_kernel_abi_source_kind_e {
   LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_CLUSTER_WORKGROUP_INFO_X = 18,
   LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_CLUSTER_WORKGROUP_INFO_XY = 19,
   LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_CLUSTER_WORKGROUP_INFO_XZ = 20,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_0 = 21,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_2 = 22,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_4 = 23,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_6 = 24,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_8 = 25,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_10 = 26,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_12 = 27,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_14 = 28,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_16 = 29,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_18 = 30,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_20 = 31,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_22 = 32,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_24 = 33,
 } loom_amdgpu_hal_kernel_abi_source_kind_t;
 
 // Maximum number of fixed physical values required by one AMDGPU HAL kernel
 // ABI. This covers hidden user SGPRs, three coordinate dimensions, packed
 // workitem state, M0, and the fixed architected launch-state sources.
-#define LOOM_AMDGPU_HAL_KERNEL_ABI_MAX_FIXED_VALUE_COUNT (8u + 2u * 3u)
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_MAX_FIXED_VALUE_COUNT (20u + 2u * 3u)
 
 // Returns the stable low.live_in source spelling for |source_kind|, or an
 // empty string for unknown/invalid kinds.
@@ -305,6 +381,11 @@ typedef struct loom_amdgpu_hal_kernel_abi_layout_t {
   // Source lowering may initialize this conservatively; HAL ABI materialization
   // refines it after low-level dead-code elimination.
   bool uses_kernarg_segment_ptr;
+  // Number of consecutive kernarg dwords copied into user SGPRs by compatible
+  // command-processor firmware. Zero disables kernarg preloading.
+  uint32_t kernarg_preload_dword_count;
+  // First kernarg dword copied when |kernarg_preload_dword_count| is nonzero.
+  uint32_t kernarg_preload_dword_offset;
   // HAL dispatch constant word count consumed by direct arguments.
   uint32_t constant_count;
   // Resource records in HAL binding/kernarg offset order.

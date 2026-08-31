@@ -40,6 +40,8 @@ typedef struct loom_amdgpu_hal_binding_materialization_result_t {
   iree_host_size_t materialized_descriptor_count;
   // True when the pass inserted the kernarg segment pointer live-in.
   bool inserted_kernarg_segment_ptr_live_in;
+  // True when the pass inserted the CP-preloaded kernarg live-in.
+  bool inserted_kernarg_preload_live_in;
 } loom_amdgpu_hal_binding_materialization_result_t;
 
 // Expands AMDGPU HAL low.resource imports, direct arguments, and descriptor

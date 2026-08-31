@@ -187,6 +187,7 @@ static iree_status_t loom_amdgpu_kernel_record_build_storage_layout(
 
 static iree_status_t loom_amdgpu_kernel_record_collect_descriptor_flags(
     const loom_low_schedule_table_t* schedule,
+    const loom_amdgpu_hal_kernel_abi_layout_t* abi_layout,
     const loom_amdgpu_hal_kernel_abi_verify_result_t* abi_verify,
     bool target_has_packed_workitem_id, bool target_has_cluster_launch_state,
     loom_amdgpu_kernel_descriptor_flags_t* out_flags) {
@@ -196,7 +197,8 @@ static iree_status_t loom_amdgpu_kernel_record_collect_descriptor_flags(
     flags |= LOOM_AMDGPU_KERNEL_DESCRIPTOR_ENABLE_SGPR_DISPATCH_PTR;
   }
   if (loom_amdgpu_kernel_record_has_abi_source(
-          abi_verify, LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_SEGMENT_PTR)) {
+          abi_verify, LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_SEGMENT_PTR) ||
+      abi_layout->kernarg_preload_dword_count != 0) {
     flags |= LOOM_AMDGPU_KERNEL_DESCRIPTOR_ENABLE_SGPR_KERNARG_SEGMENT_PTR;
   }
   if (loom_amdgpu_kernel_record_has_abi_source(
@@ -331,6 +333,18 @@ static iree_status_t loom_amdgpu_kernel_record_build_metadata_arguments(
         .kind = LOOM_AMDGPU_METADATA_ARGUMENT_BY_VALUE,
     };
   }
+  // Code-object metadata is physical-layout ordered even when reflected
+  // parameter indices intentionally map to non-monotonic kernarg offsets.
+  for (iree_host_size_t i = 1; i < argument_count; ++i) {
+    const loom_amdgpu_metadata_argument_t argument = arguments[i];
+    iree_host_size_t insertion_index = i;
+    while (insertion_index != 0 &&
+           arguments[insertion_index - 1].offset > argument.offset) {
+      arguments[insertion_index] = arguments[insertion_index - 1];
+      --insertion_index;
+    }
+    arguments[insertion_index] = argument;
+  }
   *out_arguments = arguments;
   return iree_ok_status();
 }
@@ -429,9 +443,62 @@ iree_status_t loom_amdgpu_kernel_record_build(
       &processor->properties, wavefront_size));
 
   const uint32_t user_sgpr_count = abi_verify->user_sgpr_count;
+  static const loom_amdgpu_hal_kernel_abi_source_kind_t
+      kKernargPreloadSourceKinds[] = {
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_0,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_2,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_4,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_6,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_8,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_10,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_12,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_14,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_16,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_18,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_20,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_22,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_24,
+      };
+  static_assert(IREE_ARRAYSIZE(kKernargPreloadSourceKinds) ==
+                    LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_PAIR_COUNT_MAX,
+                "kernarg preload source count");
+  const uint32_t preload_dword_count = abi_layout->kernarg_preload_dword_count;
+  if (preload_dword_count == 0) {
+    if (abi_layout->kernarg_preload_dword_offset != 0) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "AMDGPU kernel preload offset requires a nonzero length");
+    }
+  } else if (!loom_amdgpu_kernel_entry_supports_kernarg_preload(
+                 preload_dword_count,
+                 abi_layout->kernarg_preload_dword_offset) ||
+             user_sgpr_count != preload_dword_count + 2u) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "AMDGPU kernel preload requires offset zero, length eight, ten, "
+        "fourteen, or twenty-six, and two user SGPRs beyond the preload "
+        "length");
+  }
+  const uint32_t expected_preload_pair_count = preload_dword_count / 2u;
+  bool has_exact_kernarg_preloads = true;
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(kKernargPreloadSourceKinds);
+       ++i) {
+    const bool has_source = loom_amdgpu_kernel_record_has_abi_source(
+        abi_verify, kKernargPreloadSourceKinds[i]);
+    if (has_source != (i < expected_preload_pair_count)) {
+      has_exact_kernarg_preloads = false;
+      break;
+    }
+  }
+  if (!has_exact_kernarg_preloads) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "AMDGPU kernel preload layout and consecutive pair live-ins must match "
+        "exactly");
+  }
   loom_amdgpu_kernel_descriptor_flags_t descriptor_flags = 0;
   IREE_RETURN_IF_ERROR(loom_amdgpu_kernel_record_collect_descriptor_flags(
-      schedule, abi_verify,
+      schedule, abi_layout, abi_verify,
       loom_amdgpu_processor_properties_kernel_descriptor_has_flags(
           &processor->properties,
           LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID),
@@ -518,6 +585,8 @@ iree_status_t loom_amdgpu_kernel_record_build(
       .descriptor_flags = descriptor_flags,
       .system_vgpr_workitem_id = system_vgpr_workitem_id,
       .user_sgpr_count = user_sgpr_count,
+      .kernarg_preload_dword_count = abi_layout->kernarg_preload_dword_count,
+      .kernarg_preload_dword_offset = abi_layout->kernarg_preload_dword_offset,
   };
   return iree_ok_status();
 }

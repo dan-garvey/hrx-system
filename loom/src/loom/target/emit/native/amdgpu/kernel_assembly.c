@@ -47,6 +47,41 @@ static bool loom_amdgpu_kernel_assembly_supports_wgp_mode(
   return false;
 }
 
+static iree_status_t loom_amdgpu_kernel_assembly_append_entry(
+    const loom_amdgpu_kernel_record_t* record,
+    const loom_amdgpu_kernel_entry_envelope_t* entry_envelope,
+    iree_string_builder_t* builder) {
+  if (record->kernarg_preload_dword_count == 0) {
+    return iree_string_builder_append_string(builder, entry_envelope->assembly);
+  }
+  if (!loom_amdgpu_kernel_entry_supports_kernarg_preload(
+          record->kernarg_preload_dword_count,
+          record->kernarg_preload_dword_offset) ||
+      !iree_string_view_is_empty(entry_envelope->assembly)) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "AMDGPU assembly preload requires the fixed entry window");
+  }
+  const uint32_t load_count = record->kernarg_preload_dword_count / 2u;
+  for (uint32_t i = 0; i < load_count; ++i) {
+    const uint32_t register_base = 2u + i * 2u;
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder,
+        "  s_load_dwordx2 s[%" PRIu32 ":%" PRIu32 "], s[0:1], 0x%" PRIx32 "\n",
+        register_base, register_base + 1u, i * 8u));
+  }
+  IREE_RETURN_IF_ERROR(
+      iree_string_builder_append_cstring(builder, "  s_waitcnt lgkmcnt(0)\n"));
+  const uint32_t nop_count = loom_amdgpu_kernel_entry_kernarg_preload_nop_count(
+      record->kernarg_preload_dword_count);
+  for (uint32_t i = 0; i < nop_count; ++i) {
+    IREE_RETURN_IF_ERROR(
+        iree_string_builder_append_cstring(builder, "  s_nop 0\n"));
+  }
+  return iree_string_builder_append_cstring(
+      builder, ".Lkernarg_preload_firmware_entry:\n");
+}
+
 static iree_status_t loom_amdgpu_kernel_assembly_append_metadata(
     const loom_amdgpu_kernel_record_t* record, iree_string_builder_t* builder) {
   const loom_amdgpu_metadata_kernel_t* kernel = &record->metadata;
@@ -83,6 +118,15 @@ static iree_status_t loom_amdgpu_kernel_assembly_append_metadata(
   IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
       builder, "  .amdhsa_user_sgpr_count %" PRIu32 "\n",
       record->user_sgpr_count));
+  if (record->kernarg_preload_dword_count != 0) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder,
+        "  .amdhsa_user_sgpr_kernarg_preload_length %" PRIu32
+        "\n"
+        "  .amdhsa_user_sgpr_kernarg_preload_offset %" PRIu32 "\n",
+        record->kernarg_preload_dword_count,
+        record->kernarg_preload_dword_offset));
+  }
   if (!has_architected_flat_scratch) {
     IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
         builder, "  .amdhsa_user_sgpr_private_segment_buffer %u\n",
@@ -273,8 +317,8 @@ static iree_status_t loom_amdgpu_kernel_assembly_emit(
   const loom_amdgpu_kernel_entry_envelope_t* entry_envelope =
       loom_amdgpu_kernel_entry_envelope_for_properties(
           &record.processor->properties);
-  IREE_RETURN_IF_ERROR(
-      iree_string_builder_append_string(builder, entry_envelope->assembly));
+  IREE_RETURN_IF_ERROR(loom_amdgpu_kernel_assembly_append_entry(
+      &record, entry_envelope, builder));
   const loom_amdgpu_assembly_fragment_options_t assembly_options = {
       .packet_plan = options->packet_plan,
       .storage_layout = &record.storage_layout,

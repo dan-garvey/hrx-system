@@ -13,9 +13,11 @@
 #include "iree/testing/status_matchers.h"
 #include "loom/analysis/condition_facts.h"
 #include "loom/analysis/symbolic_expr_test_fixture.h"
+#include "loom/analysis/symbolic_value.h"
 #include "loom/ir/attribute.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
+#include "loom/ops/buffer/ops.h"
 #include "loom/ops/index/ops.h"
 #include "loom/ops/op_defs.h"
 #include "loom/ops/scalar/ops.h"
@@ -141,6 +143,52 @@ TEST_F(SymbolicExprTest, SemanticMatchRejectsDistinctProducerLeaves) {
   IREE_ASSERT_OK(ProveSemanticallyEquivalentUpperBound(&expression_context_,
                                                        left, right, &proof));
   EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_UNKNOWN);
+}
+
+TEST_F(SymbolicExprTest,
+       SemanticMatchAcceptsEquivalentBufferViewsAndRejectsChangedBase) {
+  loom_value_id_t buffer = LOOM_VALUE_ID_INVALID;
+  IREE_ASSERT_OK(loom_builder_define_value(&builder_, loom_type_buffer(),
+                                           &buffer));
+  loom_op_t* zero_op = nullptr;
+  IREE_ASSERT_OK(loom_index_constant_build(
+      &builder_, loom_attr_i64(0), loom_type_scalar(LOOM_SCALAR_TYPE_OFFSET),
+      LOOM_LOCATION_UNKNOWN, &zero_op));
+  loom_op_t* changed_offset_op = nullptr;
+  IREE_ASSERT_OK(loom_index_constant_build(
+      &builder_, loom_attr_i64(16), loom_type_scalar(LOOM_SCALAR_TYPE_OFFSET),
+      LOOM_LOCATION_UNKNOWN, &changed_offset_op));
+  const loom_type_t view_type = loom_type_shaped_2d(
+      LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_BF16, loom_dim_pack_static(16),
+      loom_dim_pack_static(1536), /*encoding_id=*/0);
+
+  loom_op_t* first_view_op = nullptr;
+  IREE_ASSERT_OK(loom_buffer_view_build(
+      &builder_, buffer, loom_index_constant_result(zero_op), view_type,
+      LOOM_LOCATION_UNKNOWN, &first_view_op));
+  loom_op_t* equivalent_view_op = nullptr;
+  IREE_ASSERT_OK(loom_buffer_view_build(
+      &builder_, buffer, loom_index_constant_result(zero_op), view_type,
+      LOOM_LOCATION_UNKNOWN, &equivalent_view_op));
+  loom_op_t* changed_base_view_op = nullptr;
+  IREE_ASSERT_OK(loom_buffer_view_build(
+      &builder_, buffer, loom_index_constant_result(changed_offset_op),
+      view_type, LOOM_LOCATION_UNKNOWN, &changed_base_view_op));
+
+  const loom_value_id_t first_view = loom_buffer_view_result(first_view_op);
+  const loom_value_id_t equivalent_view =
+      loom_buffer_view_result(equivalent_view_op);
+  const loom_value_id_t changed_base_view =
+      loom_buffer_view_result(changed_base_view_op);
+  EXPECT_NE(first_view, equivalent_view);
+
+  bool match = false;
+  IREE_ASSERT_OK(loom_symbolic_values_semantically_match(
+      &expression_context_, first_view, equivalent_view, &match));
+  EXPECT_TRUE(match);
+  IREE_ASSERT_OK(loom_symbolic_values_semantically_match(
+      &expression_context_, first_view, changed_base_view, &match));
+  EXPECT_FALSE(match);
 }
 
 TEST_F(SymbolicExprTest, SemanticMatchRetainsProducerDepthLimit) {

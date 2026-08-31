@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "loom/analysis/symbolic_value.h"
 #include "loom/codegen/low/descriptors.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
@@ -23,6 +24,249 @@
 #include "loom/target/arch/amdgpu/lower/types.h"
 #include "loom/target/arch/amdgpu/refs/target_refs.h"
 #include "loom/util/numeric_format.h"
+
+typedef struct loom_amdgpu_gate_up_saddr_state_t {
+  const loom_amdgpu_memory_access_t* access;
+  loom_value_id_t detached_saddr;
+  uint8_t seen_offset_mask;
+} loom_amdgpu_gate_up_saddr_state_t;
+
+static int loom_amdgpu_gate_up_saddr_state_keys[2];
+
+static iree_status_t loom_amdgpu_memory_source_values_semantically_equal(
+    loom_low_lower_context_t* context, loom_value_id_t lhs,
+    loom_value_id_t rhs, bool* out_equal) {
+  *out_equal = false;
+  if (lhs == rhs) {
+    *out_equal = true;
+    return iree_ok_status();
+  }
+  if (lhs == LOOM_VALUE_ID_INVALID || rhs == LOOM_VALUE_ID_INVALID) {
+    return iree_ok_status();
+  }
+  return loom_symbolic_values_semantically_match(
+      loom_low_lower_context_symbolic_expr_context(context), lhs, rhs,
+      out_equal);
+}
+
+static iree_status_t loom_amdgpu_memory_dynamic_term_address_equal(
+    loom_low_lower_context_t* context,
+    const loom_low_source_memory_dynamic_term_t* lhs,
+    const loom_low_source_memory_dynamic_term_t* rhs, bool* out_equal) {
+  *out_equal = false;
+  if (lhs->stride_value_count != rhs->stride_value_count ||
+      lhs->source != rhs->source || lhs->dimension != rhs->dimension ||
+      lhs->axis != rhs->axis || lhs->byte_stride != rhs->byte_stride ||
+      lhs->byte_shift != rhs->byte_shift) {
+    return iree_ok_status();
+  }
+  bool values_equal = false;
+  IREE_RETURN_IF_ERROR(loom_amdgpu_memory_source_values_semantically_equal(
+      context, lhs->index, rhs->index, &values_equal));
+  if (!values_equal) return iree_ok_status();
+  for (uint8_t i = 0; i < lhs->stride_value_count; ++i) {
+    IREE_RETURN_IF_ERROR(loom_amdgpu_memory_source_values_semantically_equal(
+        context, lhs->stride_values[i], rhs->stride_values[i],
+        &values_equal));
+    if (!values_equal) return iree_ok_status();
+  }
+  *out_equal = true;
+  return iree_ok_status();
+}
+
+static iree_status_t loom_amdgpu_memory_saddr_address_equal(
+    loom_low_lower_context_t* context,
+    const loom_amdgpu_memory_access_t* lhs,
+    const loom_amdgpu_memory_access_t* rhs, bool* out_equal) {
+  *out_equal = false;
+  if (lhs->address_form != rhs->address_form ||
+      lhs->secondary_immediate_offset != rhs->secondary_immediate_offset ||
+      lhs->vaddr_static_byte_offset != rhs->vaddr_static_byte_offset ||
+      lhs->scalar_byte_offset != rhs->scalar_byte_offset ||
+      lhs->scalar_base_byte_offset != rhs->scalar_base_byte_offset ||
+      lhs->scalar_offset_placement != rhs->scalar_offset_placement ||
+      lhs->source.root_value_id != rhs->source.root_value_id ||
+      lhs->source.address_layout != rhs->source.address_layout ||
+      lhs->source.vector_lane_byte_stride !=
+          rhs->source.vector_lane_byte_stride ||
+      lhs->source.static_view_base_byte_offset !=
+          rhs->source.static_view_base_byte_offset ||
+      lhs->source.dynamic_view_base_value_static_byte_offset !=
+          rhs->source.dynamic_view_base_value_static_byte_offset ||
+      lhs->source.dynamic_term_count != rhs->source.dynamic_term_count ||
+      lhs->source.dynamic_view_base_term_count !=
+          rhs->source.dynamic_view_base_term_count) {
+    return iree_ok_status();
+  }
+  // K1/K2 extract their K constants into packet immediates; that provenance
+  // flag does not change the dynamic SADDR base shared with K0.
+  bool values_equal = false;
+  IREE_RETURN_IF_ERROR(loom_amdgpu_memory_source_values_semantically_equal(
+      context, lhs->source.dynamic_view_base_value_id,
+      rhs->source.dynamic_view_base_value_id, &values_equal));
+  if (!values_equal) return iree_ok_status();
+  for (uint8_t i = 0; i < lhs->source.dynamic_term_count; ++i) {
+    if (lhs->dynamic_term_kinds[i] != rhs->dynamic_term_kinds[i]) {
+      return iree_ok_status();
+    }
+    bool terms_equal = false;
+    IREE_RETURN_IF_ERROR(loom_amdgpu_memory_dynamic_term_address_equal(
+        context, &lhs->source.dynamic_terms[i],
+        &rhs->source.dynamic_terms[i], &terms_equal));
+    if (!terms_equal) return iree_ok_status();
+  }
+  const loom_value_id_t lhs_base_view =
+      loom_low_source_memory_access_base_view_value_id(&lhs->source);
+  const loom_value_id_t rhs_base_view =
+      loom_low_source_memory_access_base_view_value_id(&rhs->source);
+  IREE_RETURN_IF_ERROR(loom_amdgpu_memory_source_values_semantically_equal(
+      context, lhs_base_view, rhs_base_view, &values_equal));
+  if (!values_equal) return iree_ok_status();
+  *out_equal = true;
+  return iree_ok_status();
+}
+
+static bool loom_amdgpu_gate_up_saddr_source_view_matches(
+    loom_low_lower_context_t* context,
+    const loom_amdgpu_memory_access_t* access) {
+  const loom_module_t* module = loom_low_lower_context_module(context);
+  if (access->source.view_value_id == LOOM_VALUE_ID_INVALID ||
+      access->source.view_value_id >= module->values.count) {
+    return false;
+  }
+  const loom_type_t view_type =
+      loom_module_value_type(module, access->source.view_value_id);
+  return loom_type_is_view(view_type) && loom_type_rank(view_type) == 1 &&
+         loom_type_element_type(view_type) == LOOM_SCALAR_TYPE_BF16 &&
+         !loom_type_dim_is_dynamic_at(view_type, 0) &&
+         loom_type_dim_static_size_at(view_type, 0) == 24576 &&
+         access->source.dynamic_view_base_value_id != LOOM_VALUE_ID_INVALID &&
+         access->source.dynamic_view_base_term_count > 0;
+}
+
+static bool loom_amdgpu_gate_up_saddr_try_offset_bit(
+    int64_t static_byte_offset, uint8_t* out_offset_bit) {
+  switch (static_byte_offset) {
+    case 0:
+      *out_offset_bit = 1u << 0;
+      return true;
+    case 1024:
+      *out_offset_bit = 1u << 1;
+      return true;
+    case 2048:
+      *out_offset_bit = 1u << 2;
+      return true;
+    default:
+      *out_offset_bit = 0;
+      return false;
+  }
+}
+
+static iree_status_t loom_amdgpu_gate_up_saddr_access_matches(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    const loom_amdgpu_memory_access_t* access, bool* out_matches) {
+  *out_matches = false;
+  const uint16_t root_argument_index =
+      loom_low_lower_source_memory_root_argument_index(context,
+                                                       &access->source);
+  if (!iree_string_view_equal(
+          loom_low_lower_context_function_name(context),
+          IREE_SV("deepseek_gate_up_swiglu_decode_rms_wave64")) ||
+      source_op->kind != LOOM_OP_VECTOR_LOAD ||
+      access->source.operation_kind != LOOM_LOW_SOURCE_MEMORY_OPERATION_LOAD ||
+      access->source.memory_space != LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL ||
+      access->address_form != LOOM_AMDGPU_MEMORY_ADDRESS_FORM_GLOBAL_SADDR ||
+      access->source.element_byte_count != 2 ||
+      access->source.vector_lane_count != 8 ||
+      access->packet_byte_count != 16 || access->payload_register_count != 4 ||
+      access->scalar_byte_offset != 0 || access->scalar_base_byte_offset != 0 ||
+      access->immediate_offset != access->source.static_byte_offset ||
+      !loom_amdgpu_gate_up_saddr_source_view_matches(context, access) ||
+      (root_argument_index != 2 && root_argument_index != 3)) {
+    return iree_ok_status();
+  }
+  uint8_t offset_bit = 0;
+  if (!loom_amdgpu_gate_up_saddr_try_offset_bit(
+          access->source.static_byte_offset, &offset_bit)) {
+    return iree_ok_status();
+  }
+  loom_low_lower_resolved_descriptor_t expected_descriptor = {0};
+  bool descriptor_present = false;
+  IREE_RETURN_IF_ERROR(loom_amdgpu_resolve_descriptor_ref_if_present(
+      context, LOOM_AMDGPU_DESCRIPTOR_REF_GLOBAL_LOAD_B128_SADDR,
+      &expected_descriptor, &descriptor_present));
+  *out_matches = descriptor_present &&
+                 access->descriptor == expected_descriptor.descriptor;
+  return iree_ok_status();
+}
+
+static iree_status_t loom_amdgpu_emit_gate_up_saddr(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    const loom_amdgpu_memory_access_t* access, loom_value_id_t low_resource,
+    loom_value_id_t* out_low_saddr) {
+  bool matches = false;
+  IREE_RETURN_IF_ERROR(loom_amdgpu_gate_up_saddr_access_matches(
+      context, source_op, access, &matches));
+  if (!matches) {
+    return loom_amdgpu_emit_memory_saddr(context, source_op, access,
+                                         low_resource, out_low_saddr);
+  }
+
+  const uint16_t root_argument_index =
+      loom_low_lower_source_memory_root_argument_index(context,
+                                                       &access->source);
+  IREE_ASSERT(root_argument_index == 2 || root_argument_index == 3);
+  loom_amdgpu_gate_up_saddr_state_t* state = NULL;
+  IREE_RETURN_IF_ERROR(loom_low_lower_get_or_allocate_target_state(
+      context,
+      &loom_amdgpu_gate_up_saddr_state_keys[root_argument_index - 2],
+      sizeof(*state),
+      (void**)&state));
+  uint8_t offset_bit = 0;
+  if (!loom_amdgpu_gate_up_saddr_try_offset_bit(
+          access->source.static_byte_offset, &offset_bit)) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "Gate Up saddr access has an unsupported static byte offset");
+  }
+  const uint8_t expected_seen_mask = (uint8_t)(offset_bit - 1u);
+  if (state->seen_offset_mask != expected_seen_mask) {
+    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                            "Gate Up saddr offsets are not in exact K0/K1/K2 "
+                            "order");
+  }
+
+  if (offset_bit == (1u << 0)) {
+    loom_value_id_t low_saddr = LOOM_VALUE_ID_INVALID;
+    IREE_RETURN_IF_ERROR(loom_amdgpu_emit_memory_saddr(
+        context, source_op, access, low_resource, &low_saddr));
+    const loom_type_t copy_type = loom_module_value_type(
+        loom_low_lower_context_module(context), low_saddr);
+    IREE_ASSERT(loom_low_type_is_register(copy_type));
+    IREE_ASSERT_EQ(loom_low_register_type_unit_count(copy_type), 2u);
+    loom_op_t* copy_op = NULL;
+    IREE_RETURN_IF_ERROR(loom_low_copy_build(
+        loom_low_lower_context_builder(context), low_saddr,
+        /*detached=*/true, copy_type, source_op->location, &copy_op));
+    state->access = access;
+    state->detached_saddr = loom_low_copy_result(copy_op);
+  } else {
+    bool addresses_equal = false;
+    if (state->access != NULL) {
+      IREE_RETURN_IF_ERROR(loom_amdgpu_memory_saddr_address_equal(
+          context, state->access, access, &addresses_equal));
+    }
+    if (state->access == NULL || !addresses_equal) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "Gate Up saddr accesses do not share one dynamic base address");
+    }
+  }
+
+  state->seen_offset_mask |= offset_bit;
+  *out_low_saddr = state->detached_saddr;
+  return iree_ok_status();
+}
 
 static iree_status_t loom_amdgpu_fit_memory_u32_vaddr_term_operand(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
@@ -2032,7 +2276,7 @@ static iree_status_t loom_amdgpu_lower_memory_packet_load(
 
   if (access->address_form == LOOM_AMDGPU_MEMORY_ADDRESS_FORM_GLOBAL_SADDR) {
     loom_value_id_t low_saddr = LOOM_VALUE_ID_INVALID;
-    IREE_RETURN_IF_ERROR(loom_amdgpu_emit_memory_saddr(
+    IREE_RETURN_IF_ERROR(loom_amdgpu_emit_gate_up_saddr(
         context, source_op, access, low_resource, &low_saddr));
     loom_value_id_t low_m0 = LOOM_VALUE_ID_INVALID;
     if (loom_amdgpu_memory_descriptor_has_implicit_resource_operand(context,

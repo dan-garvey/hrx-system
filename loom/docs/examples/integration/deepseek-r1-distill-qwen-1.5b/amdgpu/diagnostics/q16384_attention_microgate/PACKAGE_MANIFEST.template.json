@@ -1,0 +1,89 @@
+{
+  "artifacts": {
+    "integration_header": {
+      "path": "src/q16k_aiter_integration.h",
+      "sha256": "GENERATED",
+      "size_bytes": 1
+    },
+    "integration_source": {
+      "path": "src/q16k_aiter_integration.c",
+      "sha256": "GENERATED",
+      "size_bytes": 1
+    },
+    "q16384_kernel": {
+      "path": "artifacts/aiter_prefill_q16384_gfx950.hsaco",
+      "sha256": "GENERATED",
+      "size_bytes": 1
+    },
+    "reference_source": {
+      "path": "src/reference.c",
+      "sha256": "GENERATED",
+      "size_bytes": 1
+    },
+    "runner": {
+      "path": "bin/q16384_attention_microgate",
+      "sha256": "GENERATED",
+      "size_bytes": 1
+    },
+    "runner_source": {
+      "path": "src/q16384_attention_microgate.c",
+      "sha256": "GENERATED",
+      "size_bytes": 1
+    }
+  },
+  "execution": {
+    "authorized_cases": [
+      "q16384-first-attention"
+    ],
+    "evidence_path": "/home/dagarvey/codex-work/DEPLOYMENT_ID-evidence",
+    "maximum_gpu_invocations": 1,
+    "maximum_retries": 0,
+    "receipt_path": "/home/dagarvey/codex-work/DEPLOYMENT_ID-state/q16384-first-attention-one-run.receipt",
+    "result_path": "/home/dagarvey/codex-work/DEPLOYMENT_ID-evidence/RESULT.json",
+    "state_path": "/home/dagarvey/codex-work/DEPLOYMENT_ID-state"
+  },
+  "operator": {
+    "email": "daniel.garvey@amd.com",
+    "id": "0ebd461d-faeb-42b6-a50e-15c8cbfc8f8b",
+    "short_id": "dagarvey"
+  },
+  "reservation": {
+    "batch_opt_out": true,
+    "end_utc": "2026-08-31T20:00:00Z",
+    "id": "06a94f67-275d-78f6-8000-3680fb507fd5",
+    "start_utc": "2026-08-31T04:00:00Z"
+  },
+  "runtime": {
+    "hip_runtime": {
+      "path": "/opt/rocm/lib/libamdhip64.so",
+      "sha256": "1e9c69bed92a2cd458468e6af29707b4ebbbb94a8361adbb95d30d38b82074d4"
+    },
+    "hsa_runtime": {
+      "path": "/opt/rocm/lib/libhsa-runtime64.so.1",
+      "sha256": "d41abc620d2f228995f809b55c7e4183f513501cc070416316479f5eeaa58253"
+    },
+    "rocprofiler_register": {
+      "path": "/opt/rocm/lib/librocprofiler-register.so.0",
+      "sha256": "8faae1b02f834857d75b1f318bf826d371ff9eb30b3af5b2d26a279f4525a953"
+    }
+  },
+  "schema": "loom-q16384-first-attention-launch-abi-package-v1",
+  "scope": {
+    "attention_only": true,
+    "dependency_ordering_resolved": false,
+    "live_tensor_semantics_resolved": false,
+    "pack_semantics_resolved": false,
+    "test": "raw-hsa-vs-hip-launch-abi"
+  },
+  "source": {
+    "archived_input_root_sha256": "41a2cc18b4a5273fdeaa1ddd77b707bf5cf26356c74fd1659faab8338cae3da1",
+    "canonical_path": "loom/docs/examples/integration/deepseek-r1-distill-qwen-1.5b/amdgpu/diagnostics/q16384_attention_microgate",
+    "git_commit": "GIT_COMMIT"
+  },
+  "status": "STAGING_TEMPLATE",
+  "target": {
+    "fqdn": "asrock-gbs6a-wb13c.png-odc.dcgpu",
+    "hostname": "asrock-gbs6a-wb13c",
+    "id": "b2d65e95-3ff7-464d-93f6-bea8bab3a365"
+  }
+}

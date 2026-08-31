@@ -475,6 +475,113 @@ low.kernel.def target<test.low.core>(@gpu) abi_layout({
 }
 
 TEST_F(ArtifactManifestCollectTest,
+       DetailsPreservesLegacyLowHalLayoutWithoutOffsetArrays) {
+  ModulePtr module = ParseModule(R"(
+target.generic<reference> @gpu {
+  artifact_format = elf,
+  abi = hal_kernel
+}
+
+low.kernel.def target<test.low.core>(@gpu) abi_layout({
+  constant_count = 0,
+  direct_arg_count = 0,
+  direct_arg_names = {},
+  direct_arg_sizes = [],
+  parameter_count = 1,
+  resource_count = 1,
+  uses_kernarg_segment_ptr = true
+}) workgroup_size(64, 1, 1) @entry() {
+  low.return
+}
+)");
+
+  loom_target_artifact_manifest_collect_options_t options;
+  loom_target_artifact_manifest_collect_options_initialize(&options);
+  options.mode = LOOM_TARGET_ARTIFACT_MANIFEST_MODE_DETAILS;
+
+  iree_string_builder_t builder;
+  iree_string_view_t output =
+      CollectAndFormat(module.get(), &options,
+                       LOOM_TARGET_ARTIFACT_MANIFEST_MODE_DETAILS, &builder);
+  EXPECT_TRUE(iree_string_view_equal(
+      output, IREE_SV("{\"kind\":\"loom.artifact_manifest\","
+                      "\"schema_version\":1,"
+                      "\"mode\":\"details\","
+                      "\"artifact\":{\"format\":\"elf\"},"
+                      "\"targets\":[{\"name\":\"gpu\","
+                      "\"default_pointer_bitwidth\":64,"
+                      "\"index_bitwidth\":64,"
+                      "\"offset_bitwidth\":64}],"
+                      "\"functions\":[{\"name\":\"entry\","
+                      "\"targets\":[\"gpu\"],"
+                      "\"interface\":{\"parameter_count\":1,"
+                      "\"binding_count\":1,"
+                      "\"constant_byte_length\":0},"
+                      "\"execution\":{\"workgroup_size\":[64,1,1]}}]}")))
+      << std::string(output.data, output.size);
+  iree_string_builder_deinitialize(&builder);
+}
+
+TEST_F(ArtifactManifestCollectTest,
+       CollectsPreparedLowHalKernelParameterOffsetsFromAbiLayout) {
+  ModulePtr module = ParseModule(R"(
+target.generic<reference> @gpu {
+  artifact_format = elf,
+  abi = hal_kernel
+}
+
+low.kernel.def target<test.low.core>(@gpu) abi_layout({
+  constant_count = 1,
+  direct_arg_count = 1,
+  direct_arg_names = {arg0 = "extent"},
+  direct_arg_offsets = [8],
+  direct_arg_parameter_indices = [1],
+  direct_arg_sizes = [4],
+  parameter_count = 3,
+  resource_count = 2,
+  resource_offsets = [24, 0],
+  resource_parameter_indices = [2, 0],
+  uses_kernarg_segment_ptr = true
+}) workgroup_size(64, 1, 1) @entry() {
+  low.return
+}
+)");
+
+  loom_target_artifact_manifest_collect_options_t options;
+  loom_target_artifact_manifest_collect_options_initialize(&options);
+  options.mode = LOOM_TARGET_ARTIFACT_MANIFEST_MODE_DETAILS;
+
+  iree_string_builder_t builder;
+  iree_string_view_t output =
+      CollectAndFormat(module.get(), &options,
+                       LOOM_TARGET_ARTIFACT_MANIFEST_MODE_DETAILS, &builder);
+  EXPECT_TRUE(iree_string_view_equal(
+      output, IREE_SV("{\"kind\":\"loom.artifact_manifest\","
+                      "\"schema_version\":1,"
+                      "\"mode\":\"details\","
+                      "\"artifact\":{\"format\":\"elf\"},"
+                      "\"targets\":[{\"name\":\"gpu\","
+                      "\"default_pointer_bitwidth\":64,"
+                      "\"index_bitwidth\":64,"
+                      "\"offset_bitwidth\":64}],"
+                      "\"functions\":[{\"name\":\"entry\","
+                      "\"targets\":[\"gpu\"],"
+                      "\"interface\":{\"parameter_count\":3,"
+                      "\"binding_count\":2,"
+                      "\"constant_byte_length\":4,"
+                      "\"parameters\":["
+                      "{\"kind\":\"binding\",\"index\":0,"
+                      "\"byte_offset\":0},"
+                      "{\"kind\":\"value\",\"index\":1,"
+                      "\"byte_offset\":8,\"byte_length\":4},"
+                      "{\"kind\":\"binding\",\"index\":2,"
+                      "\"byte_offset\":24}]},"
+                      "\"execution\":{\"workgroup_size\":[64,1,1]}}]}")))
+      << std::string(output.data, output.size);
+  iree_string_builder_deinitialize(&builder);
+}
+
+TEST_F(ArtifactManifestCollectTest,
        CollectsLowHalKernelBindingCountBeforeMaterialization) {
   ModulePtr module = ParseModule(R"(
 target.generic<reference> @gpu {

@@ -15,6 +15,7 @@
 #include "loom/analysis/symbolic_expr.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
+#include "loom/ops/buffer/ops.h"
 #include "loom/ops/index/ops.h"
 #include "loom/ops/scalar/ops.h"
 #include "loom/ops/scf/ops.h"
@@ -30,6 +31,12 @@ class SymbolicExprTest : public ::testing::Test {
     iree_arena_initialize(&block_pool_, &analysis_arena_);
 
     loom_context_initialize(iree_allocator_system(), &context_);
+    iree_host_size_t buffer_vtable_count = 0;
+    const loom_op_vtable_t* const* buffer_vtables =
+        loom_buffer_dialect_vtables(&buffer_vtable_count);
+    IREE_ASSERT_OK(loom_context_register_dialect(
+        &context_, LOOM_DIALECT_BUFFER, buffer_vtables,
+        (uint16_t)buffer_vtable_count));
     iree_host_size_t index_vtable_count = 0;
     const loom_op_vtable_t* const* index_vtables =
         loom_index_dialect_vtables(&index_vtable_count);

@@ -52,6 +52,10 @@ typedef struct loom_amdgpu_kernel_record_t {
   uint32_t system_vgpr_workitem_id;
   // User SGPR count required by ABI live-ins.
   uint32_t user_sgpr_count;
+  // Descriptor kernarg-preload length in dwords.
+  uint32_t kernarg_preload_dword_count;
+  // Descriptor kernarg-preload source offset in dwords.
+  uint32_t kernarg_preload_dword_offset;
 } loom_amdgpu_kernel_record_t;
 
 typedef struct loom_amdgpu_kernel_record_options_t {

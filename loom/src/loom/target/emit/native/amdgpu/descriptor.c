@@ -50,6 +50,11 @@
 #define LOOM_AMDGPU_KERNEL_CODE_PROPERTY_WAVEFRONT_SIZE32_SHIFT 10u
 #define LOOM_AMDGPU_KERNEL_CODE_PROPERTY_USES_DYNAMIC_STACK_SHIFT 11u
 
+#define LOOM_AMDGPU_KERNARG_PRELOAD_LENGTH_SHIFT 0u
+#define LOOM_AMDGPU_KERNARG_PRELOAD_LENGTH_WIDTH 7u
+#define LOOM_AMDGPU_KERNARG_PRELOAD_OFFSET_SHIFT 7u
+#define LOOM_AMDGPU_KERNARG_PRELOAD_OFFSET_WIDTH 9u
+
 #define LOOM_AMDGPU_KERNEL_DESCRIPTOR_KERNARG_USER_SGPR_COUNT 2u
 
 static const loom_amdgpu_kernel_descriptor_flags_t
@@ -301,12 +306,54 @@ static iree_status_t loom_amdgpu_kernel_descriptor_validate(
   (void)system_vgpr_workitem_id;
   const uint32_t implied_user_sgpr_count =
       loom_amdgpu_kernel_descriptor_implied_user_sgpr_count(descriptor);
-  if (descriptor->user_sgpr_count < implied_user_sgpr_count) {
+  if (descriptor->kernarg_preload_dword_count >
+          loom_amdgpu_kernel_descriptor_bit_mask(
+              LOOM_AMDGPU_KERNARG_PRELOAD_LENGTH_WIDTH) ||
+      descriptor->kernarg_preload_dword_offset >
+          loom_amdgpu_kernel_descriptor_bit_mask(
+              LOOM_AMDGPU_KERNARG_PRELOAD_OFFSET_WIDTH)) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "AMDGPU kernel descriptor kernarg preload exceeds field capacity");
+  }
+  if (descriptor->kernarg_preload_dword_count == 0) {
+    if (descriptor->kernarg_preload_dword_offset != 0) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "AMDGPU kernel descriptor preload offset requires a nonzero length");
+    }
+  } else {
+    if (!iree_any_bit_set(
+            descriptor->flags,
+            LOOM_AMDGPU_KERNEL_DESCRIPTOR_ENABLE_SGPR_KERNARG_SEGMENT_PTR)) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "AMDGPU kernel descriptor kernarg preload "
+                              "requires a kernarg pointer");
+    }
+    if (descriptor->kernarg_preload_dword_offset >
+            UINT32_MAX - descriptor->kernarg_preload_dword_count ||
+        descriptor->kernarg_preload_dword_offset +
+                descriptor->kernarg_preload_dword_count >
+            descriptor->kernarg_size / sizeof(uint32_t)) {
+      return iree_make_status(
+          IREE_STATUS_OUT_OF_RANGE,
+          "AMDGPU kernel descriptor preload range exceeds kernarg size");
+    }
+  }
+  if (implied_user_sgpr_count >
+      UINT32_MAX - descriptor->kernarg_preload_dword_count) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "AMDGPU kernel descriptor user SGPR count overflows");
+  }
+  const uint32_t required_user_sgpr_count =
+      implied_user_sgpr_count + descriptor->kernarg_preload_dword_count;
+  if (descriptor->user_sgpr_count < required_user_sgpr_count) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "AMDGPU kernel descriptor user SGPR count %" PRIu32
                             " is smaller than implied count %" PRIu32,
                             descriptor->user_sgpr_count,
-                            implied_user_sgpr_count);
+                            required_user_sgpr_count);
   }
   const uint32_t user_sgpr_count_width =
       loom_amdgpu_kernel_descriptor_user_sgpr_count_width(*out_target);
@@ -608,6 +655,11 @@ iree_status_t loom_amdgpu_kernel_descriptor_write(
       LOOM_AMDGPU_COMPUTE_PGM_RSRC2_WORKITEM_ID_WIDTH, system_vgpr_workitem_id);
 
   uint16_t kernel_code_properties = 0;
+  uint16_t kernarg_preload = 0;
+  kernarg_preload |= (uint16_t)(descriptor->kernarg_preload_dword_count
+                                << LOOM_AMDGPU_KERNARG_PRELOAD_LENGTH_SHIFT);
+  kernarg_preload |= (uint16_t)(descriptor->kernarg_preload_dword_offset
+                                << LOOM_AMDGPU_KERNARG_PRELOAD_OFFSET_SHIFT);
   loom_amdgpu_kernel_descriptor_set_bit_u16(
       &kernel_code_properties,
       LOOM_AMDGPU_KERNEL_CODE_PROPERTY_PRIVATE_SEGMENT_BUFFER_SHIFT,
@@ -674,6 +726,7 @@ iree_status_t loom_amdgpu_kernel_descriptor_write(
                                              compute_pgm_rsrc2);
   loom_amdgpu_kernel_descriptor_store_le_u16(target_bytes.data + 56,
                                              kernel_code_properties);
-  loom_amdgpu_kernel_descriptor_store_le_u16(target_bytes.data + 58, 0);
+  loom_amdgpu_kernel_descriptor_store_le_u16(target_bytes.data + 58,
+                                             kernarg_preload);
   return iree_ok_status();
 }

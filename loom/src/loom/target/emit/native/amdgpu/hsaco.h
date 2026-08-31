@@ -30,6 +30,10 @@ typedef struct loom_amdgpu_hsaco_kernel_descriptor_options_t {
   loom_amdgpu_kernel_descriptor_flags_t flags;
   // Minimum user SGPR count implied by descriptor-only ABI flags.
   uint32_t user_sgpr_count;
+  // Descriptor kernarg-preload length in dwords.
+  uint32_t kernarg_preload_dword_count;
+  // Descriptor kernarg-preload source offset in dwords.
+  uint32_t kernarg_preload_dword_offset;
 } loom_amdgpu_hsaco_kernel_descriptor_options_t;
 
 // One kernel entry emitted into an AMDGPU HSA code object.

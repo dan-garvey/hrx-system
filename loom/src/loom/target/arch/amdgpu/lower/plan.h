@@ -935,6 +935,11 @@ typedef struct loom_amdgpu_subgroup_reduce_plan_t {
   loom_low_lower_resolved_descriptor_t dpp_descriptor;
   // Descriptor row selected for fused DPP row moves and lane combines.
   loom_low_lower_resolved_descriptor_t dpp_combine_descriptor;
+  // Descriptor row selected for experimental batched DS swizzle exchanges.
+  loom_low_lower_resolved_descriptor_t experimental_swizzle_descriptor;
+  // Descriptor row selected for experimental batched legacy DPP combines.
+  loom_low_lower_resolved_descriptor_t
+      experimental_dpp_combine_descriptor;
   // Descriptor row selected for paired 16-lane row exchanges.
   loom_low_lower_resolved_descriptor_t permlanex16_descriptor;
   // Descriptor row selected for reading a fixed VGPR lane into an SGPR.
@@ -955,6 +960,11 @@ typedef struct loom_amdgpu_subgroup_reduce_plan_t {
   uint32_t wavefront_size;
   // Number of low-numbered lanes participating in the emitted reduce tree.
   uint32_t active_lane_count;
+  // Experimental source subgroup-reduce batch size. Internal subgroup trees
+  // used by workgroup reductions leave this zero and retain baseline lowering.
+  uint32_t experimental_batch_size;
+  // Whether the exact-order FP32 add hybrid is selected for batch size eight.
+  bool experimental_f32_add_hybrid;
   // 32-bit identity element bit pattern used for inactive source lanes.
   uint32_t identity_bits;
   // Cross-lane exchange strategy selected for the subgroup tree.
@@ -1719,6 +1729,8 @@ typedef struct loom_amdgpu_prefetch_plan_t {
 typedef struct loom_amdgpu_async_gather_plan_t {
   // Source global-like view access transferred into LDS.
   loom_low_source_memory_access_plan_t source;
+  // Collective destination workgroup view written by the async packet.
+  loom_low_source_memory_access_plan_t dest;
   // Target operand path selected for each source dynamic address term.
   loom_amdgpu_memory_dynamic_index_kind_t
       source_dynamic_term_kinds[LOOM_LOW_SOURCE_MEMORY_DYNAMIC_TERM_CAPACITY];

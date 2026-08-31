@@ -36,6 +36,31 @@ typedef struct loom_amdgpu_kernel_entry_envelope_t {
   uint32_t minimum_vgpr_count;
 } loom_amdgpu_kernel_entry_envelope_t;
 
+enum {
+  // Compatible CP firmware enters this many bytes after the descriptor entry
+  // when kernarg preloading is enabled.
+  LOOM_AMDGPU_KERNARG_PRELOAD_ENTRY_SKIP_BYTES = 256,
+  // Compatibility firmware loads up to thirteen 64-bit resource pointers in
+  // naturally aligned register pairs.
+  LOOM_AMDGPU_KERNARG_PRELOAD_COMPAT_LOAD_COUNT_MAX = 13,
+};
+
+// Returns true for an exact compatibility-entry preload shape. A zero-length
+// preload is represented by the ordinary empty entry path, not by this helper.
+bool loom_amdgpu_kernel_entry_supports_kernarg_preload(
+    uint32_t kernarg_preload_dword_count,
+    uint32_t kernarg_preload_dword_offset);
+
+// Returns the number of NOPs required to fill the 256-byte firmware entry
+// window for a supported preload count, or zero for an unsupported count.
+uint32_t loom_amdgpu_kernel_entry_kernarg_preload_nop_count(
+    uint32_t kernarg_preload_dword_count);
+
+// Returns the number of native load/wait/NOP instructions in a supported
+// preload entry, or zero when preloading is disabled or unsupported.
+uint32_t loom_amdgpu_kernel_entry_kernarg_preload_instruction_count(
+    uint32_t kernarg_preload_dword_count);
+
 // Returns the immutable hardware-entry envelope selected by |properties|.
 // Targets without an entry profile return an empty record.
 const loom_amdgpu_kernel_entry_envelope_t*
@@ -46,6 +71,7 @@ loom_amdgpu_kernel_entry_envelope_for_properties(
 // Empty envelopes return the original body storage and fixup array directly.
 iree_status_t loom_amdgpu_kernel_entry_prepend_text(
     const loom_amdgpu_kernel_entry_envelope_t* envelope,
+    uint32_t kernarg_preload_dword_count, uint32_t kernarg_preload_dword_offset,
     iree_const_byte_span_t body_text,
     const loom_amdgpu_hsaco_text_fixup_t* body_fixups,
     iree_host_size_t body_fixup_count, iree_const_byte_span_t* out_text,

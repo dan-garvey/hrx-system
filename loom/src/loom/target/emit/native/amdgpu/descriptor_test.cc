@@ -410,6 +410,78 @@ TEST(AmdgpuDescriptorTest, EncodesDispatchAndKernargUserSgprs) {
   EXPECT_EQ(LoadLeU16(bytes, 56), 0x040au);
 }
 
+TEST(AmdgpuDescriptorTest, EncodesKernargPreloadAndTenUserSgprs) {
+  loom_amdgpu_metadata_kernel_t metadata = MinimalMetadataKernel();
+  metadata.kernarg_segment_size = 32;
+  metadata.wavefront_size = 64;
+  metadata.sgpr_count = 14;
+  metadata.vgpr_count = 16;
+
+  loom_amdgpu_kernel_descriptor_t descriptor = {};
+  IREE_ASSERT_OK(loom_amdgpu_kernel_descriptor_initialize_from_metadata(
+      IREE_SV("gfx950"), &metadata, 0, &descriptor));
+  descriptor.user_sgpr_count = 10;
+  descriptor.kernarg_preload_dword_count = 8;
+  descriptor.kernarg_preload_dword_offset = 0;
+  descriptor.flags |= LOOM_AMDGPU_KERNEL_DESCRIPTOR_ENABLE_SGPR_WORKGROUP_ID_X;
+
+  std::array<uint8_t, 65> bytes;
+  bytes.fill(0);
+  IREE_ASSERT_OK(loom_amdgpu_kernel_descriptor_write(
+      &descriptor, iree_make_byte_span(bytes.data(), bytes.size())));
+
+  EXPECT_EQ(LoadLeU32(bytes, 52), 0x00000094u);
+  EXPECT_EQ(LoadLeU16(bytes, 56), 0x0008u);
+  EXPECT_EQ(LoadLeU16(bytes, 58), 0x0008u);
+}
+
+TEST(AmdgpuDescriptorTest, EncodesKernargPreloadAndTwentyEightUserSgprs) {
+  loom_amdgpu_metadata_kernel_t metadata = MinimalMetadataKernel();
+  metadata.kernarg_segment_size = 104;
+  metadata.wavefront_size = 64;
+  metadata.sgpr_count = 40;
+  metadata.vgpr_count = 28;
+
+  loom_amdgpu_kernel_descriptor_t descriptor = {};
+  IREE_ASSERT_OK(loom_amdgpu_kernel_descriptor_initialize_from_metadata(
+      IREE_SV("gfx950"), &metadata, 0, &descriptor));
+  descriptor.user_sgpr_count = 28;
+  descriptor.kernarg_preload_dword_count = 26;
+  descriptor.kernarg_preload_dword_offset = 0;
+  descriptor.flags |= LOOM_AMDGPU_KERNEL_DESCRIPTOR_ENABLE_SGPR_WORKGROUP_ID_X;
+
+  std::array<uint8_t, 65> bytes;
+  bytes.fill(0);
+  IREE_ASSERT_OK(loom_amdgpu_kernel_descriptor_write(
+      &descriptor, iree_make_byte_span(bytes.data(), bytes.size())));
+
+  EXPECT_EQ(LoadLeU32(bytes, 52), 0x000000b8u);
+  EXPECT_EQ(LoadLeU16(bytes, 56), 0x0008u);
+  EXPECT_EQ(LoadLeU16(bytes, 58), 0x001au);
+}
+
+TEST(AmdgpuDescriptorTest, RejectsThirtyDwordPreloadOnGfx950) {
+  loom_amdgpu_metadata_kernel_t metadata = MinimalMetadataKernel();
+  metadata.kernarg_segment_size = 120;
+  metadata.wavefront_size = 64;
+  metadata.sgpr_count = 40;
+  metadata.vgpr_count = 28;
+
+  loom_amdgpu_kernel_descriptor_t descriptor = {};
+  IREE_ASSERT_OK(loom_amdgpu_kernel_descriptor_initialize_from_metadata(
+      IREE_SV("gfx950"), &metadata, 0, &descriptor));
+  descriptor.user_sgpr_count = 32;
+  descriptor.kernarg_preload_dword_count = 30;
+  descriptor.kernarg_preload_dword_offset = 0;
+  descriptor.flags |= LOOM_AMDGPU_KERNEL_DESCRIPTOR_ENABLE_SGPR_WORKGROUP_ID_X;
+
+  std::array<uint8_t, 64> bytes;
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_OUT_OF_RANGE,
+      loom_amdgpu_kernel_descriptor_write(
+          &descriptor, iree_make_byte_span(bytes.data(), bytes.size())));
+}
+
 TEST(AmdgpuDescriptorTest, EncodesResourceAndAbiFields) {
   loom_amdgpu_metadata_kernel_t metadata = MinimalMetadataKernel();
   metadata.group_segment_fixed_size = 128;

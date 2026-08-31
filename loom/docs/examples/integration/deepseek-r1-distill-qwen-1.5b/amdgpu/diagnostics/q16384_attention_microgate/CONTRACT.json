@@ -1,0 +1,117 @@
+{
+  "acceptance": {
+    "absolute_tolerance": 0.0625,
+    "byte_identical_raw_hsa_and_hip_outputs": true,
+    "full_output_sha256_per_launch": true,
+    "hip_output_remains_poisoned_after_raw_hsa": true,
+    "immutable_input_hashes_before_and_after_each_launch": true,
+    "reference_dimensions_per_sample": 128,
+    "reference_heads_per_sample": 12,
+    "reference_rows": [
+      0,
+      1,
+      7,
+      31,
+      4096,
+      8192,
+      16382,
+      16383
+    ],
+    "relative_tolerance": 0.015,
+    "requires_all_guards_intact": true,
+    "requires_all_outputs_finite": true,
+    "raw_hsa_output_unchanged_after_hip": true,
+    "requires_no_poison_values": true
+  },
+  "authorization": {
+    "authorized_cases": [
+      "q16384-first-attention"
+    ],
+    "maximum_gpu_invocations": 1,
+    "maximum_retries": 0,
+    "receipt_claim": "renameat2(RENAME_NOREPLACE) before hsa_init",
+    "result_reserved_before_receipt_claim": true
+  },
+  "evidence": {
+    "exact_success_payload_file_count": 52,
+    "requires_postflight_before_pass": true,
+    "requires_runner_returncode_zero": true,
+    "semantic_verifier": "scripts/verify_evidence.py"
+  },
+  "geometry": {
+    "head_dimension": 128,
+    "hip_dynamic_shared_memory_bytes": 0,
+    "hip_explicit_argument_bytes": 168,
+    "hip_grid_blocks": [
+      12,
+      1,
+      128
+    ],
+    "key_end": 16768,
+    "kv_heads": 2,
+    "metadata_i32": [
+      0,
+      16768,
+      1,
+      0,
+      0,
+      16384
+    ],
+    "position_base": 384,
+    "query_count": 16384,
+    "query_heads": 12,
+    "raw_full_header": "0x00031502",
+    "raw_grid_workitems": [
+      3072,
+      1,
+      128
+    ],
+    "raw_group_segment_bytes": 26112,
+    "raw_kernarg_bytes": 424,
+    "workgroup": [
+      256,
+      1,
+      1
+    ]
+  },
+  "launch_sequence": {
+    "hip_device_synchronizes": 1,
+    "hip_uses_same_hsaco": true,
+    "q512_code_object_loaded": false,
+    "raw_completion_waits": 1,
+    "raw_hsa_first": true,
+    "warmup_dispatches": 0
+  },
+  "runtime": {
+    "queue": {
+      "agent_fields_recorded": [
+        "minimum_size",
+        "maximum_size",
+        "type"
+      ],
+      "kernel_dispatch_feature_required": true,
+      "requested_size": 64,
+      "requested_type": "SINGLE",
+      "returned_base_address_required": true,
+      "returned_size": "max(requested_size, agent_minimum_size), power-of-two, and within agent bounds",
+      "returned_types_accepted": [
+        "SINGLE",
+        "MULTI"
+      ]
+    },
+    "hip_loaded_after_raw_queue_completion": true,
+    "live_library_root": "/opt/rocm/lib",
+    "visible_gpu_count": 1
+  },
+  "schema": "loom-q16384-first-attention-launch-abi-contract-v1",
+  "scope": {
+    "attention_only": true,
+    "launch_abi_cleared_on_pass": true,
+    "unresolved": [
+      "pack-semantics",
+      "dependency-ordering",
+      "live-tensor-semantics"
+    ]
+  },
+  "status": "not-authorized-until-external-grant"
+}

@@ -207,8 +207,144 @@ static bool loom_target_artifact_manifest_workgroup_size_is_concrete(
   return size.x != 0 && size.y != 0 && size.z != 0;
 }
 
+static iree_status_t
+loom_target_artifact_manifest_collect_low_parameter_layout(
+    const loom_module_t* module, loom_named_attr_slice_t abi_layout,
+    uint32_t parameter_count, uint32_t resource_count,
+    uint32_t direct_arg_count, iree_arena_allocator_t* arena,
+    loom_target_artifact_manifest_interface_t* out_interface) {
+  if (resource_count > UINT32_MAX - direct_arg_count ||
+      parameter_count != resource_count + direct_arg_count) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "artifact manifest ABI layout has %" PRIu32
+        " parameters but %" PRIu32 " resources and %" PRIu32
+        " direct arguments",
+        parameter_count, resource_count, direct_arg_count);
+  }
+  if (parameter_count == 0) return iree_ok_status();
+  const loom_attribute_t* resource_offsets =
+      loom_target_artifact_manifest_find_named_attr(
+          module, abi_layout, IREE_SV("resource_offsets"));
+  const loom_attribute_t* resource_parameter_indices =
+      loom_target_artifact_manifest_find_named_attr(
+          module, abi_layout, IREE_SV("resource_parameter_indices"));
+  const loom_attribute_t* direct_arg_offsets =
+      loom_target_artifact_manifest_find_named_attr(
+          module, abi_layout, IREE_SV("direct_arg_offsets"));
+  const loom_attribute_t* direct_arg_parameter_indices =
+      loom_target_artifact_manifest_find_named_attr(
+          module, abi_layout, IREE_SV("direct_arg_parameter_indices"));
+  const loom_attribute_t* direct_arg_sizes =
+      loom_target_artifact_manifest_find_named_attr(
+          module, abi_layout, IREE_SV("direct_arg_sizes"));
+
+  // Older or partially prepared low IR may only carry aggregate counts. Leave
+  // its detail rows unchanged unless the complete packed layout is present.
+  if ((resource_count != 0 &&
+       (resource_offsets == NULL || resource_parameter_indices == NULL)) ||
+      (direct_arg_count != 0 &&
+       (direct_arg_offsets == NULL || direct_arg_parameter_indices == NULL ||
+        direct_arg_sizes == NULL))) {
+    return iree_ok_status();
+  }
+  const struct {
+    const char* name;
+    const loom_attribute_t* attr;
+    uint32_t expected_count;
+  } arrays[] = {
+      {"resource_offsets", resource_offsets, resource_count},
+      {"resource_parameter_indices", resource_parameter_indices,
+       resource_count},
+      {"direct_arg_offsets", direct_arg_offsets, direct_arg_count},
+      {"direct_arg_parameter_indices", direct_arg_parameter_indices,
+       direct_arg_count},
+      {"direct_arg_sizes", direct_arg_sizes, direct_arg_count},
+  };
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(arrays); ++i) {
+    if (arrays[i].expected_count == 0 && arrays[i].attr == NULL) continue;
+    if (arrays[i].attr == NULL ||
+        arrays[i].attr->kind != LOOM_ATTR_I64_ARRAY ||
+        arrays[i].attr->count != arrays[i].expected_count ||
+        (arrays[i].expected_count != 0 &&
+         arrays[i].attr->i64_array == NULL)) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "artifact manifest ABI layout field '%s' must be an i64 array with "
+          "%" PRIu32 " elements",
+          arrays[i].name, arrays[i].expected_count);
+    }
+  }
+  loom_target_artifact_manifest_parameter_t* parameters = NULL;
+  IREE_RETURN_IF_ERROR(loom_target_artifact_manifest_allocate_array(
+      arena, parameter_count, sizeof(*parameters), (void**)&parameters));
+  uint8_t* seen_parameters = NULL;
+  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+      arena, parameter_count, sizeof(*seen_parameters),
+      (void**)&seen_parameters));
+  memset(seen_parameters, 0, parameter_count * sizeof(*seen_parameters));
+
+  for (uint32_t i = 0; i < resource_count; ++i) {
+    const int64_t parameter_index = resource_parameter_indices->i64_array[i];
+    const int64_t byte_offset = resource_offsets->i64_array[i];
+    if (parameter_index < 0 || (uint64_t)parameter_index >= parameter_count ||
+        byte_offset < 0 || seen_parameters[parameter_index]) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "invalid resource %" PRIu32 " layout in artifact manifest", i);
+    }
+    seen_parameters[parameter_index] = 1;
+    parameters[parameter_index] =
+        (loom_target_artifact_manifest_parameter_t){
+            .kind = LOOM_TARGET_ARTIFACT_MANIFEST_PARAMETER_KIND_BINDING,
+            .flags = LOOM_TARGET_ARTIFACT_MANIFEST_PARAMETER_FLAG_INDEX |
+                     LOOM_TARGET_ARTIFACT_MANIFEST_PARAMETER_FLAG_BYTE_OFFSET,
+            .index = (uint32_t)parameter_index,
+            .byte_offset = (uint64_t)byte_offset,
+        };
+  }
+  for (uint32_t i = 0; i < direct_arg_count; ++i) {
+    const int64_t parameter_index =
+        direct_arg_parameter_indices->i64_array[i];
+    const int64_t byte_offset = direct_arg_offsets->i64_array[i];
+    const int64_t byte_length = direct_arg_sizes->i64_array[i];
+    if (parameter_index < 0 || (uint64_t)parameter_index >= parameter_count ||
+        byte_offset < 0 || byte_length <= 0 ||
+        seen_parameters[parameter_index]) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "invalid direct argument %" PRIu32
+          " layout in artifact manifest",
+          i);
+    }
+    seen_parameters[parameter_index] = 1;
+    parameters[parameter_index] =
+        (loom_target_artifact_manifest_parameter_t){
+            .kind = LOOM_TARGET_ARTIFACT_MANIFEST_PARAMETER_KIND_VALUE,
+            .flags = LOOM_TARGET_ARTIFACT_MANIFEST_PARAMETER_FLAG_INDEX |
+                     LOOM_TARGET_ARTIFACT_MANIFEST_PARAMETER_FLAG_BYTE_OFFSET |
+                     LOOM_TARGET_ARTIFACT_MANIFEST_PARAMETER_FLAG_BYTE_LENGTH,
+            .index = (uint32_t)parameter_index,
+            .byte_offset = (uint64_t)byte_offset,
+            .byte_length = (uint64_t)byte_length,
+        };
+  }
+  for (uint32_t i = 0; i < parameter_count; ++i) {
+    if (!seen_parameters[i]) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "artifact manifest ABI layout has no entry for parameter %" PRIu32,
+          i);
+    }
+  }
+  out_interface->parameters = parameters;
+  out_interface->parameter_detail_count = parameter_count;
+  return iree_ok_status();
+}
+
 static iree_status_t loom_target_artifact_manifest_collect_low_layout(
     const loom_module_t* module, const loom_op_t* function_op,
+    loom_target_artifact_manifest_mode_t mode, iree_arena_allocator_t* arena,
     loom_target_artifact_manifest_interface_t* out_interface) {
   if (!loom_low_kernel_def_isa(function_op)) {
     return iree_ok_status();
@@ -256,6 +392,15 @@ static iree_status_t loom_target_artifact_manifest_collect_low_layout(
   if (constant_count_present) {
     loom_target_artifact_manifest_set_constant_byte_length(
         out_interface, (uint64_t)constant_count * 4u);
+  }
+  if (loom_target_artifact_manifest_collect_mode_includes_details(mode)) {
+    const uint32_t effective_parameter_count =
+        parameter_count_present ? parameter_count
+                                : resource_count + direct_arg_count;
+    IREE_RETURN_IF_ERROR(
+        loom_target_artifact_manifest_collect_low_parameter_layout(
+            module, abi_layout, effective_parameter_count, resource_count,
+            direct_arg_count, arena, out_interface));
   }
   return iree_ok_status();
 }
@@ -338,7 +483,7 @@ static iree_status_t loom_target_artifact_manifest_collect_low_resources(
 
 static iree_status_t loom_target_artifact_manifest_collect_hal_interface(
     const loom_module_t* module, const loom_target_entry_t* entry,
-    iree_arena_allocator_t* arena,
+    loom_target_artifact_manifest_mode_t mode, iree_arena_allocator_t* arena,
     loom_target_artifact_manifest_interface_t* out_interface) {
   const loom_target_export_plan_t* export_plan =
       loom_target_entry_bundle(entry)->export_plan;
@@ -352,7 +497,7 @@ static iree_status_t loom_target_artifact_manifest_collect_hal_interface(
     return iree_ok_status();
   }
   IREE_RETURN_IF_ERROR(loom_target_artifact_manifest_collect_low_layout(
-      module, function_op, out_interface));
+      module, function_op, mode, arena, out_interface));
   if (!iree_all_bits_set(
           out_interface->flags,
           LOOM_TARGET_ARTIFACT_MANIFEST_INTERFACE_FLAG_BINDING_COUNT)) {
@@ -614,15 +759,15 @@ static iree_status_t loom_target_artifact_manifest_collect_functions(
         loom_func_like_arg_ids(entry->func, &argument_count);
     loom_target_artifact_manifest_set_parameter_count(&functions[i].interface,
                                                       argument_count);
-    IREE_RETURN_IF_ERROR(loom_target_artifact_manifest_collect_hal_interface(
-        module, entry, arena, &functions[i].interface));
-    loom_target_artifact_manifest_collect_execution(entry,
-                                                    &functions[i].execution);
     if (loom_target_artifact_manifest_collect_mode_includes_details(mode)) {
       IREE_RETURN_IF_ERROR(loom_target_artifact_manifest_collect_parameters(
           module, argument_ids, argument_count, arena,
           &functions[i].interface));
     }
+    IREE_RETURN_IF_ERROR(loom_target_artifact_manifest_collect_hal_interface(
+        module, entry, mode, arena, &functions[i].interface));
+    loom_target_artifact_manifest_collect_execution(entry,
+                                                    &functions[i].execution);
   }
   *out_functions = functions;
   return iree_ok_status();

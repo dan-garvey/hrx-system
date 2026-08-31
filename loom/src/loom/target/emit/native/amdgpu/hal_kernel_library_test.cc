@@ -476,6 +476,8 @@ class AmdgpuHalKernelLibraryTest : public ::testing::Test {
         "abi_layout({constant_count = 1, direct_arg_count = 1, "
         "direct_arg_names = {arg0 = \"extent\"}, direct_arg_offsets = [8], "
         "direct_arg_parameter_indices = [1], direct_arg_sizes = [4], "
+        "kernarg_preload_dword_count = 0, "
+        "kernarg_preload_dword_offset = 0, "
         "parameter_count = 2, resource_count = 1, resource_offsets = [0], "
         "resource_parameter_indices = [0], uses_kernarg_segment_ptr = true}) "
         "workgroup_size(64, 1, 1) @loom_kernel() {\n"

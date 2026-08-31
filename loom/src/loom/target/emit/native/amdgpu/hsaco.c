@@ -835,6 +835,10 @@ static iree_status_t loom_amdgpu_hsaco_build_rodata(
     descriptor.user_sgpr_count =
         iree_max(descriptor.user_sgpr_count,
                  file->kernels[i].descriptor_options.user_sgpr_count);
+    descriptor.kernarg_preload_dword_count =
+        file->kernels[i].descriptor_options.kernarg_preload_dword_count;
+    descriptor.kernarg_preload_dword_offset =
+        file->kernels[i].descriptor_options.kernarg_preload_dword_offset;
     IREE_RETURN_IF_ERROR(loom_amdgpu_kernel_descriptor_validate_metadata(
         &descriptor, &payloads->metadata_kernels[i]));
 

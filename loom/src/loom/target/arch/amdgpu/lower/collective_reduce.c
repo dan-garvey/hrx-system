@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "loom/analysis/condition_facts.h"
 #include "loom/analysis/symbolic_expr.h"
@@ -25,6 +26,28 @@
 #include "loom/util/cfg_graph.h"
 
 #define LOOM_AMDGPU_MAX_SUBGROUP_TREE_STEPS 6u
+#define LOOM_AMDGPU_MAX_EXPERIMENTAL_REDUCE_BATCH 8u
+
+enum {
+  LOOM_AMDGPU_DS_SWIZZLE_BITMASK_AND = 0x1Fu,
+  LOOM_AMDGPU_DS_SWIZZLE_BITMASK_XOR_SHIFT = 10u,
+  LOOM_AMDGPU_DPP_CTRL_ROW_ROR_8 =
+      LOOM_AMDGPU_DPP_CTRL_ROW_ROR_FIRST + 7u,
+};
+
+static uint32_t loom_amdgpu_subgroup_reduce_experimental_batch_size(
+    const loom_low_lower_context_t* context) {
+  const char* value = getenv("LOOM_AMDGPU_SUBGROUP_REDUCE_BATCH");
+  const char* function =
+      getenv("LOOM_AMDGPU_SUBGROUP_REDUCE_FUNCTION");
+  if (value == NULL || function == NULL ||
+      !iree_string_view_equal(loom_low_lower_context_function_name(context),
+                              iree_make_cstring_view(function))) {
+    return 1u;
+  }
+  const unsigned long parsed = strtoul(value, NULL, 10);
+  return parsed == 2u || parsed == 4u || parsed == 8u ? (uint32_t)parsed : 1u;
+}
 
 static const loom_amdgpu_collective_combine_dpp_form_t
     kLoomAmdgpuSubgroupReduceDppCombineForms[] = {
@@ -857,6 +880,42 @@ iree_status_t loom_amdgpu_select_kernel_subgroup_reduce_plan(
       context, wavefront_size, active_lane_count, kind, payload_kind,
       &out_plan->dpp_descriptor, &out_plan->dpp_combine_descriptor,
       &out_plan->permlanex16_descriptor, &out_plan->crosslane_kind));
+  const uint32_t experimental_batch_size =
+      loom_amdgpu_subgroup_reduce_experimental_batch_size(context);
+  const bool experimental_f32_add_hybrid =
+      experimental_batch_size == 8u && register_count > 1u &&
+      wavefront_size == 64u &&
+      active_lane_count == wavefront_size &&
+      kind == LOOM_COMBINING_KIND_ADDF &&
+      loom_amdgpu_collective_payload_is_float(payload_kind);
+  if (experimental_f32_add_hybrid) {
+    const loom_amdgpu_descriptor_resolution_t hybrid_resolutions[] = {
+        {
+            .descriptor_ref = LOOM_AMDGPU_DESCRIPTOR_REF_DS_SWIZZLE_B32,
+            .out_descriptor = &out_plan->experimental_swizzle_descriptor,
+        },
+        {
+            .descriptor_ref = LOOM_AMDGPU_DESCRIPTOR_REF_V_ADD_F32_DPP,
+            .out_descriptor =
+                &out_plan->experimental_dpp_combine_descriptor,
+        },
+    };
+    IREE_RETURN_IF_ERROR(loom_amdgpu_resolve_descriptor_refs_if_present(
+        context, hybrid_resolutions, IREE_ARRAYSIZE(hybrid_resolutions),
+        &descriptors_present));
+    if (!descriptors_present) {
+      return iree_ok_status();
+    }
+  } else if (wavefront_size == 64 && active_lane_count == wavefront_size &&
+             experimental_batch_size > 1u) {
+    bool dpp_descriptor_present = false;
+    IREE_RETURN_IF_ERROR(loom_amdgpu_resolve_descriptor_ref_if_present(
+        context, LOOM_AMDGPU_DESCRIPTOR_REF_V_MOV_B32_DPP,
+        &out_plan->dpp_descriptor, &dpp_descriptor_present));
+    if (!dpp_descriptor_present) {
+      return iree_ok_status();
+    }
+  }
   if (publication_kind ==
           LOOM_AMDGPU_SUBGROUP_REDUCE_PUBLICATION_SCALAR_BROADCAST &&
       out_plan->crosslane_kind !=
@@ -893,6 +952,8 @@ iree_status_t loom_amdgpu_select_kernel_subgroup_reduce_plan(
   out_plan->register_count = register_count;
   out_plan->wavefront_size = wavefront_size;
   out_plan->active_lane_count = active_lane_count;
+  out_plan->experimental_batch_size = experimental_batch_size;
+  out_plan->experimental_f32_add_hybrid = experimental_f32_add_hybrid;
   out_plan->identity_bits = identity_bits;
   out_plan->publication_kind = publication_kind;
   *out_selected = true;
@@ -1226,6 +1287,8 @@ static iree_status_t loom_amdgpu_emit_subgroup_reduce_xor_tree(
     const loom_amdgpu_subgroup_reduce_plan_t* plan, loom_value_id_t lane_id,
     loom_type_t lane_type, loom_value_id_t* inout_registers) {
   const bool precompute_step_values = plan->register_count > 1;
+  const bool experimental_f32_add_hybrid =
+      plan->experimental_f32_add_hybrid;
   loom_value_id_t source_byte_offsets[LOOM_AMDGPU_MAX_SUBGROUP_TREE_STEPS] = {
       0};
   uint32_t step_count = 0;
@@ -1233,6 +1296,9 @@ static iree_status_t loom_amdgpu_emit_subgroup_reduce_xor_tree(
       loom_amdgpu_subgroup_reduce_first_offset(plan->active_lane_count);
   if (precompute_step_values) {
     for (uint32_t offset = first_offset; offset != 0; offset >>= 1) {
+      if (experimental_f32_add_hybrid && offset != 32u) {
+        continue;
+      }
       IREE_ASSERT_LT(step_count, IREE_ARRAYSIZE(source_byte_offsets));
       loom_value_id_t source_lane = LOOM_VALUE_ID_INVALID;
       IREE_RETURN_IF_ERROR(loom_amdgpu_emit_subgroup_xor_lane(
@@ -1242,6 +1308,90 @@ static iree_status_t loom_amdgpu_emit_subgroup_reduce_xor_tree(
           &source_byte_offsets[step_count]));
       ++step_count;
     }
+  }
+
+  const uint32_t experimental_batch_size = plan->experimental_batch_size;
+  const uint32_t batch_size =
+      iree_min(plan->register_count, experimental_batch_size);
+  if (experimental_batch_size > 1u) {
+    for (uint32_t batch_begin = 0; batch_begin < plan->register_count;
+         batch_begin += batch_size) {
+      const uint32_t batch_count =
+          iree_min(batch_size, plan->register_count - batch_begin);
+      loom_value_id_t accumulators[LOOM_AMDGPU_MAX_EXPERIMENTAL_REDUCE_BATCH];
+      loom_value_id_t peers[LOOM_AMDGPU_MAX_EXPERIMENTAL_REDUCE_BATCH];
+      for (uint32_t i = 0; i < batch_count; ++i) {
+        accumulators[i] = inout_registers[batch_begin + i];
+      }
+      uint32_t step_index = 0;
+      for (uint32_t offset = first_offset; offset != 0;
+           offset >>= 1, ++step_index) {
+        if (experimental_f32_add_hybrid &&
+            (offset == 8u || offset <= 2u)) {
+          const uint32_t dpp_ctrl =
+              offset == 8u   ? LOOM_AMDGPU_DPP_CTRL_ROW_ROR_8
+              : offset == 2u ? LOOM_AMDGPU_DPP_CTRL_QUAD_SWAP_2
+                             : LOOM_AMDGPU_DPP_CTRL_QUAD_SWAP_1;
+          for (uint32_t i = 0; i < batch_count; ++i) {
+            IREE_RETURN_IF_ERROR(loom_amdgpu_emit_subgroup_dpp_combine_register(
+                context, source_op,
+                &plan->experimental_dpp_combine_descriptor, accumulators[i],
+                accumulators[i], dpp_ctrl, lane_type, &accumulators[i]));
+          }
+          continue;
+        }
+        if (!experimental_f32_add_hybrid && offset <= 2u) {
+          const uint32_t dpp_ctrl =
+              offset == 2u ? LOOM_AMDGPU_DPP_CTRL_QUAD_SWAP_2
+                           : LOOM_AMDGPU_DPP_CTRL_QUAD_SWAP_1;
+          for (uint32_t i = 0; i < batch_count; ++i) {
+            IREE_RETURN_IF_ERROR(loom_amdgpu_emit_direct_crosslane_register(
+                context, source_op, &plan->dpp_descriptor,
+                LOOM_AMDGPU_CROSSLANE_DPP, accumulators[i], dpp_ctrl,
+                lane_type, &peers[i]));
+          }
+        } else if (experimental_f32_add_hybrid &&
+                   (offset == 16u || offset == 4u)) {
+          const uint32_t swizzle_immediate =
+              LOOM_AMDGPU_DS_SWIZZLE_BITMASK_AND |
+              (offset << LOOM_AMDGPU_DS_SWIZZLE_BITMASK_XOR_SHIFT);
+          for (uint32_t i = 0; i < batch_count; ++i) {
+            IREE_RETURN_IF_ERROR(loom_amdgpu_emit_direct_crosslane_register(
+                context, source_op, &plan->experimental_swizzle_descriptor,
+                LOOM_AMDGPU_CROSSLANE_SWIZZLE, accumulators[i],
+                swizzle_immediate, lane_type, &peers[i]));
+          }
+        } else {
+          loom_value_id_t source_byte_offset = LOOM_VALUE_ID_INVALID;
+          if (precompute_step_values) {
+            source_byte_offset = source_byte_offsets[
+                experimental_f32_add_hybrid ? 0u : step_index];
+          } else {
+            loom_value_id_t source_lane = LOOM_VALUE_ID_INVALID;
+            IREE_RETURN_IF_ERROR(loom_amdgpu_emit_subgroup_xor_lane(
+                context, source_op, lane_id, offset, lane_type, &source_lane));
+            IREE_RETURN_IF_ERROR(loom_amdgpu_emit_subgroup_lane_byte_offset(
+                context, source_op, source_lane, lane_type,
+                &source_byte_offset));
+          }
+          for (uint32_t i = 0; i < batch_count; ++i) {
+            IREE_RETURN_IF_ERROR(loom_amdgpu_emit_subgroup_bpermute_register(
+                context, source_op, &plan->bpermute_descriptor,
+                source_byte_offset, /*static_byte_offset=*/0, accumulators[i],
+                lane_type, &peers[i]));
+          }
+        }
+        for (uint32_t i = 0; i < batch_count; ++i) {
+          IREE_RETURN_IF_ERROR(loom_amdgpu_emit_subgroup_combine(
+              context, source_op, &plan->combine_descriptor, accumulators[i],
+              peers[i], lane_type, &accumulators[i]));
+        }
+      }
+      for (uint32_t i = 0; i < batch_count; ++i) {
+        inout_registers[batch_begin + i] = accumulators[i];
+      }
+    }
+    return iree_ok_status();
   }
 
   for (uint32_t i = 0; i < plan->register_count; ++i) {

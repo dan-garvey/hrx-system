@@ -19,9 +19,9 @@ static loomc_status_t loomc_status_from_iree_status(iree_status_t status) {
 loomc_status_t loomc_status_allocate(loomc_status_code_t code, const char* file,
                                      uint32_t line,
                                      loomc_string_view_t message) {
-  return loomc_status_from_iree_status(
-      iree_status_allocate((iree_status_code_t)code, file, line,
-                           iree_make_string_view(message.data, message.size)));
+  return loomc_status_from_iree_status(iree_status_allocate_copy(
+      (iree_status_code_t)code, iree_make_cstring_view(file), line,
+      iree_make_string_view(message.data, message.size)));
 }
 
 void loomc_status_free(loomc_status_t status) {

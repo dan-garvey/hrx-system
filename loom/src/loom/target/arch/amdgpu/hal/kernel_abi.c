@@ -24,6 +24,8 @@
 #define LOOM_AMDGPU_HAL_KERNEL_ABI_MAX_RESOURCE_COUNT UINT16_MAX
 #define LOOM_AMDGPU_HAL_KERNEL_ABI_DIRECT_ARG_MAX_UNIT_COUNT 2u
 #define LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION UINT8_MAX
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_COUNT_MAX 127u
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_OFFSET_MAX 511u
 
 typedef enum loom_amdgpu_hal_kernel_abi_reg_class_e {
   LOOM_AMDGPU_HAL_KERNEL_ABI_REG_CLASS_NONE = 0,
@@ -39,6 +41,7 @@ typedef enum loom_amdgpu_hal_kernel_abi_source_role_e {
   LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_ROLE_PACKED_WORKITEM_ID = 4,
   LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_ROLE_M0 = 5,
   LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_ROLE_FIXED_SGPR = 6,
+  LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_ROLE_KERNARG_PRELOAD = 7,
 } loom_amdgpu_hal_kernel_abi_source_role_t;
 
 typedef struct loom_amdgpu_hal_kernel_abi_source_info_t {
@@ -146,6 +149,45 @@ static const loom_amdgpu_hal_kernel_abi_source_info_t
             CLUSTER_WORKGROUP_INFO_XZ, 114,
             LOOM_AMDGPU_HAL_KERNEL_ABI_LAUNCH_WORKGROUP_ID_X |
                 LOOM_AMDGPU_HAL_KERNEL_ABI_LAUNCH_WORKGROUP_ID_Z),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_0, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_2, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_4, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_6, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_8, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_10, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_12, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_14, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_16, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_18, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_20, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_22, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
+        LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_INFO(
+            KERNARG_PRELOAD_24, KERNARG_PRELOAD, SGPR, 2,
+            LOOM_AMDGPU_HAL_KERNEL_ABI_NO_DIMENSION),
 };
 static_assert(IREE_ARRAYSIZE(kLoomAmdgpuHalKernelAbiSourceInfos) <= 64,
               "AMDGPU HAL ABI source presence fits its retained bitset");
@@ -416,6 +458,46 @@ static void loom_amdgpu_hal_kernel_abi_build_fixed_values(
         user_sgpr_base, source_info->unit_count);
     user_sgpr_base += source_info->unit_count;
   }
+  static const loom_amdgpu_hal_kernel_abi_source_kind_t
+      kKernargPreloadSourceKinds[] = {
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_0,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_2,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_4,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_6,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_8,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_10,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_12,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_14,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_16,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_18,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_20,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_22,
+          LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_KERNARG_PRELOAD_24,
+      };
+  bool has_kernarg_preload = false;
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(kKernargPreloadSourceKinds);
+       ++i) {
+    has_kernarg_preload |=
+        live_in_values[kKernargPreloadSourceKinds[i]] != LOOM_VALUE_ID_INVALID;
+  }
+  if (has_kernarg_preload) {
+    // The compatibility entry always consumes s[0:1] as the kernarg pointer.
+    // Reserve that architected prefix even if ordinary DCE removed the now-dead
+    // kernarg live-in from the optimized body.
+    user_sgpr_base = iree_max(user_sgpr_base, 2u);
+    for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(kKernargPreloadSourceKinds);
+         ++i) {
+      const loom_value_id_t value_id =
+          live_in_values[kKernargPreloadSourceKinds[i]];
+      if (value_id == LOOM_VALUE_ID_INVALID) {
+        continue;
+      }
+      loom_amdgpu_hal_kernel_abi_append_fixed_value(
+          result->fixed_values, &result->fixed_value_count, value_id,
+          user_sgpr_base, 2u);
+      user_sgpr_base += 2u;
+    }
+  }
   result->user_sgpr_count = user_sgpr_base;
 
   uint32_t workgroup_id_sgpr = user_sgpr_base;
@@ -430,6 +512,7 @@ static void loom_amdgpu_hal_kernel_abi_build_fixed_values(
     uint32_t location_base = 0;
     switch (source_info->role) {
       case LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_ROLE_USER_SGPR:
+      case LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_ROLE_KERNARG_PRELOAD:
         continue;
       case LOOM_AMDGPU_HAL_KERNEL_ABI_SOURCE_ROLE_WORKGROUP_ID:
         location_base = workgroup_id_sgpr++;
@@ -786,6 +869,8 @@ typedef struct loom_amdgpu_hal_kernel_abi_layout_attr_keys_t {
   loom_string_id_t direct_arg_offsets;
   loom_string_id_t direct_arg_parameter_indices;
   loom_string_id_t direct_arg_sizes;
+  loom_string_id_t kernarg_preload_dword_count;
+  loom_string_id_t kernarg_preload_dword_offset;
   loom_string_id_t parameter_count;
   loom_string_id_t resource_count;
   loom_string_id_t resource_offsets;
@@ -810,6 +895,12 @@ static iree_status_t loom_amdgpu_hal_kernel_abi_intern_layout_attr_keys(
                                 &out_keys->direct_arg_parameter_indices));
   IREE_RETURN_IF_ERROR(loom_module_intern_string(
       module, IREE_SV("direct_arg_sizes"), &out_keys->direct_arg_sizes));
+  IREE_RETURN_IF_ERROR(
+      loom_module_intern_string(module, IREE_SV("kernarg_preload_dword_count"),
+                                &out_keys->kernarg_preload_dword_count));
+  IREE_RETURN_IF_ERROR(
+      loom_module_intern_string(module, IREE_SV("kernarg_preload_dword_offset"),
+                                &out_keys->kernarg_preload_dword_offset));
   IREE_RETURN_IF_ERROR(loom_module_intern_string(
       module, IREE_SV("parameter_count"), &out_keys->parameter_count));
   IREE_RETURN_IF_ERROR(loom_module_intern_string(
@@ -879,6 +970,38 @@ static iree_status_t loom_amdgpu_hal_kernel_abi_make_direct_arg_sizes_attr(
     entries[i] = layout->direct_args[i].kernarg_size;
   }
   *out_attr = loom_attr_i64_array(entries, (uint16_t)layout->direct_arg_count);
+  return iree_ok_status();
+}
+
+static iree_status_t loom_amdgpu_hal_kernel_abi_validate_kernarg_preload(
+    const loom_amdgpu_hal_kernel_abi_layout_t* layout) {
+  const uint32_t count = layout->kernarg_preload_dword_count;
+  const uint32_t offset = layout->kernarg_preload_dword_offset;
+  if (count > LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_COUNT_MAX ||
+      offset > LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_PRELOAD_OFFSET_MAX) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "AMDGPU HAL ABI kernarg preload exceeds descriptor field capacity");
+  }
+  if (count == 0) {
+    if (offset != 0) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "AMDGPU HAL ABI kernarg preload offset requires a nonzero count");
+    }
+    return iree_ok_status();
+  }
+  if (!layout->uses_kernarg_segment_ptr) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "AMDGPU HAL ABI kernarg preload requires the kernarg segment pointer");
+  }
+  if (offset > UINT32_MAX - count ||
+      offset + count > layout->kernarg_segment_size / sizeof(uint32_t)) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "AMDGPU HAL ABI kernarg preload range exceeds the kernarg segment");
+  }
   return iree_ok_status();
 }
 
@@ -957,6 +1080,8 @@ iree_status_t loom_amdgpu_hal_kernel_abi_make_layout_attr(
         "AMDGPU HAL ABI layout attr construction requires a module, layout, "
         "scratch arena, and output");
   }
+  IREE_RETURN_IF_ERROR(
+      loom_amdgpu_hal_kernel_abi_validate_kernarg_preload(layout));
 
   loom_amdgpu_hal_kernel_abi_layout_attr_keys_t keys = {0};
   IREE_RETURN_IF_ERROR(
@@ -997,6 +1122,10 @@ iree_status_t loom_amdgpu_hal_kernel_abi_make_layout_attr(
       {.name_id = keys.direct_arg_parameter_indices,
        .value = direct_arg_parameter_indices_attr},
       {.name_id = keys.direct_arg_sizes, .value = direct_arg_sizes_attr},
+      {.name_id = keys.kernarg_preload_dword_count,
+       .value = loom_attr_i64(layout->kernarg_preload_dword_count)},
+      {.name_id = keys.kernarg_preload_dword_offset,
+       .value = loom_attr_i64(layout->kernarg_preload_dword_offset)},
       {.name_id = keys.parameter_count,
        .value = loom_attr_i64(layout->parameter_count)},
       {.name_id = keys.resource_count,
@@ -1818,6 +1947,10 @@ static iree_status_t loom_amdgpu_hal_kernel_abi_lookup_layout_attr_keys(
           module, IREE_SV("direct_arg_parameter_indices")),
       .direct_arg_sizes =
           loom_module_lookup_string(module, IREE_SV("direct_arg_sizes")),
+      .kernarg_preload_dword_count = loom_module_lookup_string(
+          module, IREE_SV("kernarg_preload_dword_count")),
+      .kernarg_preload_dword_offset = loom_module_lookup_string(
+          module, IREE_SV("kernarg_preload_dword_offset")),
       .parameter_count =
           loom_module_lookup_string(module, IREE_SV("parameter_count")),
       .resource_count =
@@ -1835,6 +1968,8 @@ static iree_status_t loom_amdgpu_hal_kernel_abi_lookup_layout_attr_keys(
       out_keys->direct_arg_offsets == LOOM_STRING_ID_INVALID ||
       out_keys->direct_arg_parameter_indices == LOOM_STRING_ID_INVALID ||
       out_keys->direct_arg_sizes == LOOM_STRING_ID_INVALID ||
+      out_keys->kernarg_preload_dword_count == LOOM_STRING_ID_INVALID ||
+      out_keys->kernarg_preload_dword_offset == LOOM_STRING_ID_INVALID ||
       out_keys->parameter_count == LOOM_STRING_ID_INVALID ||
       out_keys->resource_count == LOOM_STRING_ID_INVALID ||
       out_keys->resource_offsets == LOOM_STRING_ID_INVALID ||
@@ -2072,6 +2207,14 @@ iree_status_t loom_amdgpu_hal_kernel_abi_layout_from_attr(
   uint32_t constant_count = 0;
   IREE_RETURN_IF_ERROR(loom_amdgpu_hal_kernel_abi_decode_u32_layout_attr(
       top_attrs, keys.constant_count, &constant_count));
+  uint32_t kernarg_preload_dword_count = 0;
+  IREE_RETURN_IF_ERROR(loom_amdgpu_hal_kernel_abi_decode_u32_layout_attr(
+      top_attrs, keys.kernarg_preload_dword_count,
+      &kernarg_preload_dword_count));
+  uint32_t kernarg_preload_dword_offset = 0;
+  IREE_RETURN_IF_ERROR(loom_amdgpu_hal_kernel_abi_decode_u32_layout_attr(
+      top_attrs, keys.kernarg_preload_dword_offset,
+      &kernarg_preload_dword_offset));
   if (resource_count > LOOM_AMDGPU_HAL_KERNEL_ABI_MAX_RESOURCE_COUNT) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
@@ -2205,11 +2348,13 @@ iree_status_t loom_amdgpu_hal_kernel_abi_layout_from_attr(
       .kernarg_segment_alignment =
           LOOM_AMDGPU_HAL_KERNEL_ABI_GLOBAL_BUFFER_KERNARG_ALIGNMENT,
       .uses_kernarg_segment_ptr = loom_attr_as_bool(*uses_kernarg_attr),
+      .kernarg_preload_dword_count = kernarg_preload_dword_count,
+      .kernarg_preload_dword_offset = kernarg_preload_dword_offset,
       .constant_count = constant_count,
       .resources = resources,
       .resource_count = resource_count,
       .direct_args = direct_args,
       .direct_arg_count = direct_arg_count,
   };
-  return iree_ok_status();
+  return loom_amdgpu_hal_kernel_abi_validate_kernarg_preload(out_layout);
 }

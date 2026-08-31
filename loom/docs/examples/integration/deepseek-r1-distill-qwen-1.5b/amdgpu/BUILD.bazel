@@ -1,0 +1,85 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# bazel-to-cmake: skip
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(
+    "//loom/build_tools/bazel:build_defs.bzl",
+    "loom_cc_binary",
+    "loom_cc_test",
+    "loom_config_compatible_with",
+)
+
+package(
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],  # Apache 2.0
+)
+
+LOOMC_TARGET_AMDGPU_COMPATIBLE_WITH = loom_config_compatible_with([
+    "//loom/config/target/arch:amdgpu",
+    "//loom/config/emit:amdgpu",
+])
+
+loom_cc_binary(
+    name = "deepseek_r1",
+    srcs = [
+        "deepseek_q16k_schedule.h",
+        "deepseek_r1.c",
+        "diagnostics/first_attention/q16k_first_attention_diagnostic.c",
+        "diagnostics/first_attention/q16k_first_attention_diagnostic.h",
+        "q16k_aiter_integration.c",
+        "q16k_aiter_integration.h",
+        "q16k_dense_asm_contract.h",
+    ],
+    linkopts = ["-lcrypto"],
+    target_compatible_with = LOOMC_TARGET_AMDGPU_COMPATIBLE_WITH,
+    deps = [
+        "//build_tools:dl",
+        "//loom/binding/c:loomc",
+        "//loom/binding/c/target/amdgpu",
+        "//third_party:hsa_runtime_headers",
+    ],
+)
+
+loom_cc_test(
+    name = "q16k_first_attention_diagnostic_test",
+    srcs = [
+        "diagnostics/first_attention/q16k_first_attention_diagnostic.c",
+        "diagnostics/first_attention/q16k_first_attention_diagnostic.h",
+        "diagnostics/first_attention/q16k_first_attention_diagnostic_test.c",
+        "q16k_aiter_integration.c",
+        "q16k_aiter_integration.h",
+    ],
+    tags = ["hostonly"],
+)
+
+sh_test(
+    name = "deepseek_r1_host_test",
+    srcs = ["deepseek_r1_host_test.sh"],
+    args = ["$(location :deepseek_r1)"],
+    data = [":deepseek_r1"],
+)
+
+sh_test(
+    name = "q16k_first_attention_tools_test",
+    srcs = [
+        "diagnostics/first_attention/first_attention_tools_test.sh",
+    ],
+    args = [
+        "$(location diagnostics/first_attention/one_post.py)",
+        "$(location diagnostics/first_attention/analyze_first_attention.py)",
+        "$(location diagnostics/first_attention/authorize_once.py)",
+        "$(location diagnostics/first_attention/first_attention_tools_test.py)",
+    ],
+    data = [
+        "diagnostics/first_attention/analyze_first_attention.py",
+        "diagnostics/first_attention/authorization.py",
+        "diagnostics/first_attention/authorize_once.py",
+        "diagnostics/first_attention/first_attention_tools_test.py",
+        "diagnostics/first_attention/one_post.py",
+    ],
+)

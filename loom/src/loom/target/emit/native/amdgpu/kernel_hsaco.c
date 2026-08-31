@@ -51,11 +51,20 @@ iree_status_t loom_amdgpu_build_kernel_hsaco_contribution(
   iree_const_byte_span_t kernel_text = iree_const_byte_span_empty();
   const loom_amdgpu_hsaco_text_fixup_t* kernel_text_fixups = NULL;
   IREE_RETURN_IF_ERROR(loom_amdgpu_kernel_entry_prepend_text(
-      entry_envelope, stream.text, stream.text_fixups, stream.text_fixup_count,
-      &kernel_text, &kernel_text_fixups, scratch_arena));
+      entry_envelope, record.kernarg_preload_dword_count,
+      record.kernarg_preload_dword_offset, stream.text, stream.text_fixups,
+      stream.text_fixup_count, &kernel_text, &kernel_text_fixups,
+      scratch_arena));
+  const uint32_t preload_entry_instruction_count =
+      loom_amdgpu_kernel_entry_kernarg_preload_instruction_count(
+          record.kernarg_preload_dword_count);
   uint64_t kernel_instruction_count = 0;
-  if (!iree_checked_add_u64(stream.instruction_count,
-                            entry_envelope->instruction_count,
+  uint64_t total_entry_instruction_count = 0;
+  if (!iree_checked_add_u64(entry_envelope->instruction_count,
+                            preload_entry_instruction_count,
+                            &total_entry_instruction_count) ||
+      !iree_checked_add_u64(stream.instruction_count,
+                            total_entry_instruction_count,
                             &kernel_instruction_count)) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                             "AMDGPU kernel entry instruction count overflowed");
@@ -71,6 +80,9 @@ iree_status_t loom_amdgpu_build_kernel_hsaco_contribution(
           {
               .flags = record.descriptor_flags,
               .user_sgpr_count = record.user_sgpr_count,
+              .kernarg_preload_dword_count = record.kernarg_preload_dword_count,
+              .kernarg_preload_dword_offset =
+                  record.kernarg_preload_dword_offset,
           },
       .text = kernel_text,
       .text_fixups = kernel_text_fixups,
@@ -110,7 +122,7 @@ iree_status_t loom_amdgpu_build_kernel_hsaco_contribution(
           {
               .instruction_count = kernel_instruction_count,
               .body_instruction_count = stream.instruction_count,
-              .entry_instruction_count = entry_envelope->instruction_count,
+              .entry_instruction_count = total_entry_instruction_count,
               .coissued_instruction_count = coissued_instruction_count,
               .coissued_component_count = coissued_instruction_count * 2u,
               .text_byte_count = kernel_text.data_length,

@@ -6,6 +6,8 @@
 
 #include "loomc/status.h"
 
+#include <cstring>
+#include <memory>
 #include <string>
 
 #include "iree/base/api.h"
@@ -80,6 +82,37 @@ TEST(StatusTest, FormattingUsesTwoPassPattern) {
   EXPECT_TRUE(loomc_status_format(status, buffer.size(), buffer.data(),
                                   &written_length));
   EXPECT_EQ(written_length, required_length);
+  loomc_status_free(status);
+}
+
+TEST(StatusTest, AllocateCopiesHeapBackedMessage) {
+  constexpr char kFile[] = "heap_status_test.cc";
+  constexpr char kMessage[] = "heap-backed status message";
+  auto file = std::make_unique<char[]>(sizeof(kFile));
+  auto message = std::make_unique<char[]>(sizeof(kMessage) - 1);
+  std::memcpy(file.get(), kFile, sizeof(kFile));
+  std::memcpy(message.get(), kMessage, sizeof(kMessage) - 1);
+
+  loomc_status_t status = loomc_status_allocate(
+      LOOMC_STATUS_INTERNAL, file.get(), 123,
+      loomc_make_string_view(message.get(), sizeof(kMessage) - 1));
+  std::memset(file.get(), 'f', sizeof(kFile) - 1);
+  std::memset(message.get(), 'm', sizeof(kMessage) - 1);
+  file.reset();
+  message.reset();
+
+#if LOOMC_STATUS_FEATURES & LOOMC_STATUS_FEATURE_ANNOTATIONS
+  EXPECT_EQ(ToString(loomc_status_message(status)), kMessage);
+#else
+  EXPECT_TRUE(loomc_string_view_is_empty(loomc_status_message(status)));
+#endif
+#if LOOMC_STATUS_FEATURES & LOOMC_STATUS_FEATURE_SOURCE_LOCATION
+  loomc_status_source_location_t source_location =
+      loomc_status_source_location(status);
+  EXPECT_EQ(ToString(source_location.file), kFile);
+  EXPECT_EQ(source_location.line, 123u);
+#endif
+
   loomc_status_free(status);
 }
 
