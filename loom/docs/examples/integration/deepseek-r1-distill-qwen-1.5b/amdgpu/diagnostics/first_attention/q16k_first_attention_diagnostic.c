@@ -153,7 +153,7 @@ void q16k_first_attention_diagnostic_observe_attention(
   diagnostic->kernel = *kernel;
   diagnostic->kernel.name = diagnostic->kernel_name;
   diagnostic->geometry = *geometry;
-  diagnostic->packet = *published_packet;
+  diagnostic->packet = dispatch_result->packet_snapshot;
   diagnostic->dispatch_result = *dispatch_result;
   diagnostic->kernarg_size = source_kernarg_size;
 

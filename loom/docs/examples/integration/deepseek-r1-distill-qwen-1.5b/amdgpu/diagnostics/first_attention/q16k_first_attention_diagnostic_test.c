@@ -10,6 +10,8 @@ typedef struct queue_mock_s {
   uint64_t read_index;
   uint64_t doorbell;
   uint32_t loom_stage_count;
+  q16k_aiter_dispatch_packet_t* packets;
+  uint32_t queue_size;
 } queue_mock_t;
 
 static uint64_t mock_load_write(void* user_data, const void* queue) {
@@ -30,14 +32,17 @@ static void mock_store_write(void* user_data, void* queue, uint64_t value) {
 static void mock_ring_doorbell(void* user_data, void* queue,
                                uint64_t packet_id) {
   (void)queue;
-  ((queue_mock_t*)user_data)->doorbell = packet_id;
+  queue_mock_t* mock = (queue_mock_t*)user_data;
+  mock->doorbell = packet_id;
+  memset(&mock->packets[packet_id & (mock->queue_size - 1u)], 0,
+         sizeof(mock->packets[0]));
 }
 
 static void mock_publish(void* user_data,
                          q16k_aiter_dispatch_packet_t* packet,
-                         uint16_t dimensions) {
+                         uint32_t full_header) {
   (void)user_data;
-  packet->full_header = ((uint32_t)dimensions << 16) | UINT32_C(0x1502);
+  packet->full_header = full_header;
 }
 
 static q16k_aiter_status_t mock_enqueue_loom(
@@ -125,6 +130,8 @@ int main(void) {
 
   queue_mock_t mock = {0};
   q16k_aiter_dispatch_packet_t packets[8] = {0};
+  mock.packets = packets;
+  mock.queue_size = 8u;
   _Alignas(Q16K_AITER_KERNARG_ALIGNMENT)
       uint8_t kernarg_ring[4u * Q16K_AITER_KERNARG_STRIDE] = {0};
   int queue_identity = 0;
@@ -173,6 +180,8 @@ int main(void) {
   CHECK(diagnostic.packet.full_header == UINT32_C(0x00031502));
   CHECK(diagnostic.packet.kernel_object == UINT64_C(0xdef000));
   CHECK(diagnostic.packet.grid_size_z == 128u);
+  CHECK(packets[1].full_header == 0u);
+  CHECK(packets[1].kernel_object == 0u);
   CHECK(diagnostic.kernarg_size == Q16K_AITER_ATTENTION_KERNARG_SIZE);
   CHECK(diagnostic.source_kernarg_matches_ring == 1u);
   CHECK(load_i32(diagnostic.kernarg, 40u) == -1);

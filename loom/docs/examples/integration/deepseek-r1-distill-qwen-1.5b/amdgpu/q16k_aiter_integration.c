@@ -827,6 +827,10 @@ static int is_power_of_two_u32(uint32_t value) {
   return value != 0u && (value & (value - 1u)) == 0u;
 }
 
+static uint32_t make_system_dispatch_full_header(uint16_t dimensions) {
+  return ((uint32_t)dimensions << 16) | UINT32_C(0x00001502);
+}
+
 static q16k_aiter_status_t validate_queue_state(
     const q16k_aiter_queue_state_t* queue) {
   if (queue == NULL || queue->queue == NULL || queue->packets == NULL ||
@@ -972,8 +976,14 @@ q16k_aiter_status_t q16k_aiter_dispatch_raw(
   packet->kernel_object = kernel->kernel_object;
   packet->kernarg_address = (uint64_t)(uintptr_t)kernarg_address;
   packet->completion_signal = completion_signal;
-  queue->ops.publish_dispatch_packet(
-      queue->user_data, packet, dimensions);
+  const uint32_t full_header = make_system_dispatch_full_header(dimensions);
+  if (out_result != NULL) {
+    out_result->packet_id = write_index;
+    out_result->kernarg_slot = kernarg_slot;
+    out_result->packet_snapshot = *packet;
+    out_result->packet_snapshot.full_header = full_header;
+  }
+  queue->ops.publish_dispatch_packet(queue->user_data, packet, full_header);
   queue->kernarg_cursor++;
 
   uint32_t doorbell_written = 0u;
@@ -1001,8 +1011,6 @@ q16k_aiter_status_t q16k_aiter_dispatch_raw(
     doorbell_written = 1u;
   }
   if (out_result != NULL) {
-    out_result->packet_id = write_index;
-    out_result->kernarg_slot = kernarg_slot;
     out_result->doorbell_written = doorbell_written;
   }
   return Q16K_AITER_STATUS_OK;
@@ -1101,13 +1109,11 @@ q16k_aiter_status_t q16k_aiter_enqueue_layer(
       hook->observe_attention != NULL ? &attention_dispatch : NULL);
   if (status != Q16K_AITER_STATUS_OK) return status;
   if (hook->observe_attention != NULL) {
-    const q16k_aiter_dispatch_packet_t* published_packet =
-        &hook->queue->packets[
-            attention_dispatch.packet_id & (hook->queue->queue_size - 1u)];
     hook->observe_attention(
         hook->attention_observer_user_data, layer_plan,
         hook->attention_kernel, &attention_geometry, attention_kernarg,
-        sizeof(attention_kernarg), published_packet, &attention_dispatch);
+        sizeof(attention_kernarg), &attention_dispatch.packet_snapshot,
+        &attention_dispatch);
   }
 
   status = hook->enqueue_loom(

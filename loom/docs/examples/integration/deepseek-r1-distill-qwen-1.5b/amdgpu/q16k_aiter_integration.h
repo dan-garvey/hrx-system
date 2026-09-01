@@ -283,7 +283,7 @@ typedef void (*q16k_aiter_queue_ring_doorbell_fn)(
     void* user_data, void* queue, uint64_t packet_id);
 typedef void (*q16k_aiter_queue_publish_packet_fn)(
     void* user_data, q16k_aiter_dispatch_packet_t* packet,
-    uint16_t dimensions);
+    uint32_t full_header);
 
 typedef struct q16k_aiter_queue_ops_s {
   q16k_aiter_queue_load_index_fn load_write_index_relaxed;
@@ -325,6 +325,9 @@ typedef struct q16k_aiter_dispatch_result_s {
   uint64_t packet_id;
   uint32_t kernarg_slot;
   uint32_t doorbell_written;
+  // Detached before release publication so consumers never reread a live
+  // queue slot that the device may already have invalidated.
+  q16k_aiter_dispatch_packet_t packet_snapshot;
 } q16k_aiter_dispatch_result_t;
 
 q16k_aiter_status_t q16k_aiter_dispatch_raw(

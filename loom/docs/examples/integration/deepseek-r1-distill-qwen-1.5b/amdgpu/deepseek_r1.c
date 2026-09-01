@@ -27,6 +27,7 @@
 #define DEEPSEEK_Q16K_SCHEDULE_IMPLEMENTATION
 #include "deepseek_q16k_schedule.h"
 #include "diagnostics/first_attention/q16k_first_attention_diagnostic.h"
+#include "diagnostics/full_model_sync/q16k_full_model_sync_diagnostic.h"
 #include "q16k_dense_asm_contract.h"
 #include "q16k_aiter_integration.h"
 
@@ -315,6 +316,8 @@
   "DEEPSEEK_Q16K_AITER_ASSET_ROOT"
 #define DEEPSEEK_Q16K_FIRST_ATTENTION_DIAGNOSTIC_ENV \
   "DEEPSEEK_Q16K_FIRST_ATTENTION_DIAGNOSTIC"
+#define DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC_ENV \
+  "DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC"
 #define DEEPSEEK_Q16K_DENSE_ASM_FILENAME \
   "bf16gemm_bf16_tn_256x256.co"
 #define DEEPSEEK_Q16K_DENSE_EPILOGUE_FILENAME "dense_epilogues.hsaco"
@@ -2562,6 +2565,8 @@ typedef struct deepseek_state_t {
   q16k_aiter_allocation_plan_t q16k_aiter_allocation_plan;
   const char* q16k_first_attention_diagnostic_path;
   q16k_first_attention_diagnostic_t q16k_first_attention_diagnostic;
+  const char* q16k_full_model_sync_diagnostic_path;
+  q16k_full_model_sync_diagnostic_t q16k_full_model_sync_diagnostic;
 
   void* checkpoint_data;
   void* key_cache_data;
@@ -2659,6 +2664,10 @@ static void deepseek_state_initialize(deepseek_state_t* state,
   state->q16k_first_attention_diagnostic_path =
       state->q16k_aiter_enabled
           ? getenv(DEEPSEEK_Q16K_FIRST_ATTENTION_DIAGNOSTIC_ENV)
+          : NULL;
+  state->q16k_full_model_sync_diagnostic_path =
+      state->q16k_aiter_enabled
+          ? getenv(DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC_ENV)
           : NULL;
   state->active_kernel_count = active_kernel_count_for_mode(experimental_mode);
   state->repetitions = repetitions;
@@ -7467,13 +7476,12 @@ static void q16k_queue_ring_doorbell_screlease(
 
 static void q16k_queue_publish_dispatch_packet(
     void* user_data, q16k_aiter_dispatch_packet_t* packet,
-    uint16_t dimensions) {
+    uint32_t full_header) {
   deepseek_q16k_queue_bridge_t* bridge =
       (deepseek_q16k_queue_bridge_t*)user_data;
-  const uint16_t setup =
-      dimensions << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS;
   publish_dispatch_packet((hsa_kernel_dispatch_packet_t*)(void*)packet,
-                          make_system_dispatch_header(), setup);
+                          (uint16_t)full_header,
+                          (uint16_t)(full_header >> 16));
   bridge->state->metrics.dispatch_count++;
 }
 
@@ -7947,6 +7955,360 @@ static loomc_status_t q16k_first_attention_diagnostic_to_status(
       q16k_first_attention_diagnostic_status_string(status));
 }
 
+static loomc_status_t q16k_full_model_sync_diagnostic_to_status(
+    q16k_full_model_sync_status_t status, const char* description) {
+  if (status == Q16K_FULL_MODEL_SYNC_OK) return loomc_ok_status();
+  return DEEPSEEK_STATUS(
+      status == Q16K_FULL_MODEL_SYNC_IO_ERROR ? LOOMC_STATUS_DATA_LOSS
+                                               : LOOMC_STATUS_FAILED_PRECONDITION,
+      "q16K full-model synchronization diagnostic %s failed: %s",
+      description, q16k_full_model_sync_status_string(status));
+}
+
+typedef struct deepseek_q16k_full_model_sync_context_t {
+  deepseek_state_t* state;
+  bool worker_failure;
+  loomc_status_t worker_status;
+} deepseek_q16k_full_model_sync_context_t;
+
+static uint64_t worker_q16k_full_model_sync_now_ns(void* user_data) {
+  (void)user_data;
+  return monotonic_now_ns();
+}
+
+static q16k_aiter_status_t worker_q16k_full_model_sync_arm(
+    void* user_data, q16k_full_model_sync_stage_t stage, uint32_t layer,
+    uint64_t completion_signal) {
+  (void)stage;
+  (void)layer;
+  deepseek_q16k_full_model_sync_context_t* context =
+      (deepseek_q16k_full_model_sync_context_t*)user_data;
+  if (context == NULL || context->state == NULL || completion_signal == 0u ||
+      completion_signal != context->state->dispatch_signal.handle) {
+    return Q16K_AITER_STATUS_INVALID_ARGUMENT;
+  }
+  DEEPSEEK_HSA_CALL_VOID(&context->state->api, hsa_signal_store_screlease,
+                         context->state->dispatch_signal, 1);
+  return Q16K_AITER_STATUS_OK;
+}
+
+static q16k_aiter_status_t worker_q16k_full_model_sync_wait(
+    void* user_data, q16k_full_model_sync_stage_t stage, uint32_t layer,
+    uint64_t completion_signal) {
+  deepseek_q16k_full_model_sync_context_t* context =
+      (deepseek_q16k_full_model_sync_context_t*)user_data;
+  if (context == NULL || context->state == NULL || completion_signal == 0u ||
+      completion_signal != context->state->dispatch_signal.handle ||
+      context->worker_failure) {
+    return Q16K_AITER_STATUS_INVALID_ARGUMENT;
+  }
+  char description[128];
+  snprintf(description, sizeof(description),
+           "q16K full-model %s layer %" PRIu32,
+           stage == Q16K_FULL_MODEL_SYNC_STAGE_PACK ? "pack" : "attention",
+           layer);
+  loomc_status_t status = wait_for_completion(
+      context->state, context->state->dispatch_signal, true, description);
+  if (!loomc_status_is_ok(status)) {
+    context->worker_failure = true;
+    context->worker_status = status;
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+  return Q16K_AITER_STATUS_OK;
+}
+
+static void worker_q16k_full_model_sync_cursor(
+    void* user_data, const q16k_aiter_queue_state_t* queue,
+    uint32_t reclaimed) {
+  (void)reclaimed;
+  deepseek_q16k_full_model_sync_context_t* context =
+      (deepseek_q16k_full_model_sync_context_t*)user_data;
+  if (context == NULL || context->state == NULL || queue == NULL) return;
+  context->state->kernarg_cursor = queue->kernarg_cursor;
+}
+
+static void worker_q16k_full_model_sync_hash_bytes(
+    const void* data, size_t byte_count, char formatted[65]) {
+  deepseek_sha256_t hash;
+  uint8_t digest[32];
+  sha256_initialize(&hash);
+  sha256_update(&hash, (const uint8_t*)data, byte_count);
+  sha256_finalize(&hash, digest);
+  sha256_format(digest, formatted);
+}
+
+static q16k_aiter_status_t worker_q16k_full_model_sync_capture_metadata(
+    deepseek_q16k_full_model_sync_context_t* context,
+    const q16k_aiter_layer_plan_t* layer_plan,
+    q16k_full_model_sync_metadata_phase_t phase) {
+  if (context == NULL || context->state == NULL || layer_plan == NULL ||
+      context->worker_failure || layer_plan->layer != 0u ||
+      layer_plan->position_base != Q16K_AITER_LEGACY_PREFIX_ROWS ||
+      layer_plan->logical_query_count != Q16K_AITER_CHUNK_CAPACITY) {
+    return Q16K_AITER_STATUS_INVALID_ARGUMENT;
+  }
+  deepseek_state_t* state = context->state;
+  q16k_full_model_sync_diagnostic_t* diagnostic =
+      &state->q16k_full_model_sync_diagnostic;
+  q16k_full_model_sync_metadata_snapshot_t* snapshot =
+      phase == Q16K_FULL_MODEL_SYNC_METADATA_POST_PACK_PRE_ATTENTION
+          ? &diagnostic->post_pack_pre_attention_metadata
+          : &diagnostic->post_attention_metadata;
+  if (snapshot->copy_attempted != 0u || snapshot->captured != 0u) {
+    context->worker_failure = true;
+    context->worker_status = loomc_make_status(
+        LOOMC_STATUS_FAILED_PRECONDITION,
+        "q16K metadata snapshot was attempted more than once");
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+
+  const char* description =
+      phase == Q16K_FULL_MODEL_SYNC_METADATA_POST_PACK_PRE_ATTENTION
+          ? "q16K metadata after pack before attention"
+          : "q16K metadata after attention";
+  snapshot->copy_attempted = 1u;
+  snapshot->copy_begin_ns = monotonic_now_ns();
+  const uint64_t wait_count_begin = state->metrics.host_wait_count;
+  loomc_status_t status = copy_from_gpu(
+      state, state->staging_data_alt, state->q16k_aiter_metadata_data,
+      Q16K_AITER_METADATA_SIZE, description);
+  snapshot->copy_end_ns = monotonic_now_ns();
+  const uint64_t copy_wait_count =
+      state->metrics.host_wait_count >= wait_count_begin
+          ? state->metrics.host_wait_count - wait_count_begin
+          : 0u;
+  snapshot->copy_wait_count = copy_wait_count;
+  if (!loomc_status_is_ok(status)) {
+    context->worker_failure = true;
+    context->worker_status = status;
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+  if (copy_wait_count != 1u) {
+    context->worker_failure = true;
+    context->worker_status = DEEPSEEK_STATUS(
+        LOOMC_STATUS_INTERNAL,
+        "%s completed with %" PRIu64 " host waits; expected 1",
+        description, copy_wait_count);
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+  snapshot->copy_completed = 1u;
+
+  int32_t words[Q16K_FULL_MODEL_SYNC_METADATA_WORD_COUNT];
+  memcpy(words, state->staging_data_alt, Q16K_AITER_METADATA_SIZE);
+  char formatted[65];
+  worker_q16k_full_model_sync_hash_bytes(
+      state->staging_data_alt, Q16K_AITER_METADATA_SIZE, formatted);
+  const q16k_full_model_sync_status_t capture_status =
+      q16k_full_model_sync_capture_metadata_snapshot(
+          diagnostic, phase, layer_plan, Q16K_AITER_METADATA_SIZE,
+          snapshot->copy_begin_ns, snapshot->copy_end_ns, copy_wait_count,
+          words, formatted);
+  if (capture_status != Q16K_FULL_MODEL_SYNC_OK) {
+    context->worker_failure = true;
+    context->worker_status = q16k_full_model_sync_diagnostic_to_status(
+        capture_status, description);
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+  return Q16K_AITER_STATUS_OK;
+}
+
+static q16k_aiter_status_t
+worker_q16k_full_model_sync_capture_first_attention_output(
+    deepseek_q16k_full_model_sync_context_t* context,
+    const q16k_aiter_layer_plan_t* layer_plan, bool pre_attention) {
+  if (context == NULL || context->state == NULL || layer_plan == NULL ||
+      context->worker_failure || layer_plan->layer != 0u ||
+      layer_plan->position_base != Q16K_AITER_LEGACY_PREFIX_ROWS ||
+      layer_plan->logical_query_count != Q16K_AITER_CHUNK_CAPACITY) {
+    return Q16K_AITER_STATUS_INVALID_ARGUMENT;
+  }
+  deepseek_state_t* state = context->state;
+  q16k_full_model_sync_diagnostic_t* diagnostic =
+      &state->q16k_full_model_sync_diagnostic;
+  uint32_t* hash_captured =
+      pre_attention ? &diagnostic->first_attention_pre_hash_captured
+                    : &diagnostic->first_attention_hash_captured;
+  uint32_t* copy_attempted =
+      pre_attention ? &diagnostic->first_attention_pre_copy_wait_attempted
+                    : &diagnostic->first_attention_copy_wait_attempted;
+  uint32_t* copy_completed =
+      pre_attention ? &diagnostic->first_attention_pre_copy_wait_completed
+                    : &diagnostic->first_attention_copy_wait_completed;
+  uint64_t* copy_begin_ns =
+      pre_attention ? &diagnostic->first_attention_pre_copy_begin_ns
+                    : &diagnostic->first_attention_copy_begin_ns;
+  uint64_t* copy_end_ns =
+      pre_attention ? &diagnostic->first_attention_pre_copy_end_ns
+                    : &diagnostic->first_attention_copy_end_ns;
+  uint64_t* copy_wait_count =
+      pre_attention ? &diagnostic->first_attention_pre_copy_wait_count
+                    : &diagnostic->first_attention_copy_wait_count;
+  const char* description =
+      pre_attention ? "q16K full-model pre-attention output"
+                    : "q16K full-model post-attention output";
+  if (*copy_attempted != 0u || *hash_captured != 0u) {
+    context->worker_failure = true;
+    context->worker_status = DEEPSEEK_STATUS(
+        LOOMC_STATUS_FAILED_PRECONDITION, "%s copy was attempted more than once",
+        description);
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+
+  const size_t byte_count = Q16K_FULL_MODEL_SYNC_FIRST_ATTENTION_BYTE_COUNT;
+  if (byte_count > state->staging_size ||
+      state->staging_size <
+          Q16K_FULL_MODEL_SYNC_RETAINED_PRE_ATTENTION_OFFSET ||
+      byte_count >
+          state->staging_size -
+              Q16K_FULL_MODEL_SYNC_RETAINED_PRE_ATTENTION_OFFSET) {
+    context->worker_failure = true;
+    context->worker_status = loomc_make_status(
+        LOOMC_STATUS_RESOURCE_EXHAUSTED,
+        "q16K first-attention output exceeds retained host staging capacity");
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+
+  *copy_attempted = 1u;
+  *copy_begin_ns = monotonic_now_ns();
+  const uint64_t wait_count_begin = state->metrics.host_wait_count;
+  loomc_status_t status = copy_from_gpu(
+      state, state->staging_data, state->scratch.attention, byte_count,
+      description);
+  *copy_end_ns = monotonic_now_ns();
+  *copy_wait_count =
+      state->metrics.host_wait_count >= wait_count_begin
+          ? state->metrics.host_wait_count - wait_count_begin
+          : 0u;
+  if (!loomc_status_is_ok(status)) {
+    context->worker_failure = true;
+    context->worker_status = status;
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+  if (*copy_wait_count != 1u) {
+    context->worker_failure = true;
+    context->worker_status = DEEPSEEK_STATUS(
+        LOOMC_STATUS_INTERNAL,
+        "%s copy completed with %" PRIu64 " host waits; expected 1",
+        description, *copy_wait_count);
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+  *copy_completed = 1u;
+
+  char formatted[Q16K_FULL_MODEL_SYNC_SHA256_STRING_SIZE];
+  worker_q16k_full_model_sync_hash_bytes(state->staging_data, byte_count,
+                                         formatted);
+  const q16k_full_model_sync_status_t capture_status =
+      pre_attention
+          ? q16k_full_model_sync_capture_first_attention_pre(
+                diagnostic, layer_plan, byte_count, *copy_begin_ns,
+                *copy_end_ns, *copy_wait_count, formatted)
+          : q16k_full_model_sync_capture_first_attention(
+                diagnostic, layer_plan, byte_count, *copy_begin_ns,
+                *copy_end_ns, *copy_wait_count, formatted);
+  if (capture_status != Q16K_FULL_MODEL_SYNC_OK) {
+    context->worker_failure = true;
+    context->worker_status = q16k_full_model_sync_diagnostic_to_status(
+        capture_status,
+        pre_attention ? "pre-attention output hash capture"
+                      : "post-attention output hash capture");
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+  uint8_t* retained_pre_attention =
+      (uint8_t*)state->staging_data_alt +
+      Q16K_FULL_MODEL_SYNC_RETAINED_PRE_ATTENTION_OFFSET;
+  if (pre_attention) {
+    memcpy(retained_pre_attention, state->staging_data, byte_count);
+    return Q16K_AITER_STATUS_OK;
+  }
+
+  q16k_full_model_sync_first_attention_difference_t difference;
+  q16k_full_model_sync_status_t difference_status =
+      q16k_full_model_sync_analyze_first_attention_difference(
+          retained_pre_attention, state->staging_data, byte_count,
+          layer_plan->logical_query_count,
+          Q16K_FULL_MODEL_SYNC_FIRST_ATTENTION_HEAD_COUNT,
+          Q16K_FULL_MODEL_SYNC_FIRST_ATTENTION_HEAD_DIMENSION, &difference);
+  if (difference_status == Q16K_FULL_MODEL_SYNC_OK) {
+    difference_status =
+        q16k_full_model_sync_capture_first_attention_difference(
+            diagnostic, &difference);
+  }
+  if (difference_status != Q16K_FULL_MODEL_SYNC_OK) {
+    context->worker_failure = true;
+    context->worker_status = q16k_full_model_sync_diagnostic_to_status(
+        difference_status, "first-attention host difference analysis");
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+  return Q16K_AITER_STATUS_OK;
+}
+
+static q16k_aiter_status_t worker_q16k_full_model_sync_pre_attention(
+    void* user_data, const q16k_aiter_layer_plan_t* layer_plan,
+    const void* pack_kernarg, size_t pack_kernarg_size,
+    const void* attention_kernarg, size_t attention_kernarg_size) {
+  deepseek_q16k_full_model_sync_context_t* context =
+      (deepseek_q16k_full_model_sync_context_t*)user_data;
+  if (context == NULL || context->state == NULL || layer_plan == NULL ||
+      context->worker_failure) {
+    return Q16K_AITER_STATUS_INVALID_ARGUMENT;
+  }
+  char pack_sha256[65];
+  char attention_sha256[65];
+  worker_q16k_full_model_sync_hash_bytes(pack_kernarg, pack_kernarg_size,
+                                         pack_sha256);
+  worker_q16k_full_model_sync_hash_bytes(
+      attention_kernarg, attention_kernarg_size, attention_sha256);
+  const q16k_full_model_sync_status_t capture_status =
+      q16k_full_model_sync_capture_first_layer_kernargs(
+          &context->state->q16k_full_model_sync_diagnostic, layer_plan,
+          pack_kernarg, pack_kernarg_size, pack_sha256, attention_kernarg,
+          attention_kernarg_size, attention_sha256);
+  if (capture_status != Q16K_FULL_MODEL_SYNC_OK) {
+    context->worker_failure = true;
+    context->worker_status = q16k_full_model_sync_diagnostic_to_status(
+        capture_status, "first-layer kernarg capture");
+    return Q16K_AITER_STATUS_CALLBACK_FAILED;
+  }
+  const q16k_aiter_status_t metadata_status =
+      worker_q16k_full_model_sync_capture_metadata(
+      context, layer_plan,
+      Q16K_FULL_MODEL_SYNC_METADATA_POST_PACK_PRE_ATTENTION);
+  if (metadata_status != Q16K_AITER_STATUS_OK) return metadata_status;
+  return worker_q16k_full_model_sync_capture_first_attention_output(
+      context, layer_plan, true);
+}
+
+static q16k_aiter_status_t worker_q16k_full_model_sync_post_attention(
+    void* user_data, const q16k_aiter_layer_plan_t* layer_plan) {
+  deepseek_q16k_full_model_sync_context_t* context =
+      (deepseek_q16k_full_model_sync_context_t*)user_data;
+  if (context == NULL || context->state == NULL || layer_plan == NULL ||
+      context->worker_failure) {
+    return Q16K_AITER_STATUS_INVALID_ARGUMENT;
+  }
+  deepseek_state_t* state = context->state;
+  q16k_full_model_sync_diagnostic_t* diagnostic =
+      &state->q16k_full_model_sync_diagnostic;
+  if (diagnostic->first_attention_hash_captured != 0u ||
+      layer_plan->layer != 0u ||
+      layer_plan->position_base != Q16K_AITER_LEGACY_PREFIX_ROWS) {
+    return Q16K_AITER_STATUS_OK;
+  }
+
+  q16k_aiter_status_t metadata_status =
+      worker_q16k_full_model_sync_capture_metadata(
+          context, layer_plan, Q16K_FULL_MODEL_SYNC_METADATA_POST_ATTENTION);
+  if (metadata_status != Q16K_AITER_STATUS_OK) return metadata_status;
+  return worker_q16k_full_model_sync_capture_first_attention_output(
+      context, layer_plan, false);
+}
+
+static void worker_q16k_finish_bound_queue(
+    deepseek_state_t* state, const q16k_aiter_queue_state_t* queue_state) {
+  q16k_queue_bridge_export(state, queue_state);
+  q16k_dense_backend_unbind_queue(state->q16k_dense_backend, queue_state);
+}
+
 static loomc_status_t worker_q16k_aiter_suffix_forward(
     deepseek_state_t* state, uint32_t query_count) {
   if (!state->q16k_aiter_enabled || !state->tiled_prefill_active ||
@@ -8014,14 +8376,18 @@ static loomc_status_t worker_q16k_aiter_suffix_forward(
   q16k_queue_bridge_initialize(state, &bridge, &queue_state);
   deepseek_q16k_features_t dense_features = {0};
   deepseek_q16k_callbacks_t dense_callbacks = {0};
+  bool bound_worker_failure = false;
+  loomc_status_t bound_worker_status;
   if (!q16k_dense_backend_install_feature(
           state->q16k_dense_backend, &queue_state, &dense_features,
           &dense_callbacks) ||
       !dense_features.dense_gemm_256x256 ||
       dense_callbacks.dense_gemm_256x256 == NULL) {
-    return loomc_make_status(
+    bound_worker_failure = true;
+    bound_worker_status = loomc_make_status(
         LOOMC_STATUS_FAILED_PRECONDITION,
         "q16K dense backend rejected the live AITER queue installation");
+    status = Q16K_AITER_STATUS_FEATURE_DISABLED;
   }
   deepseek_q16k_layer_callback_t callback = {
       .state = state,
@@ -8052,8 +8418,10 @@ static loomc_status_t worker_q16k_aiter_suffix_forward(
       weight_pointer(state, state->weights.embedding),
       state->scratch.hidden,
   };
-  status = worker_q16k_aiter_dispatch_dense(
-      state, &queue_state, Q16K_DENSE_EMBEDDING, bindings, 4u, 0u, 0u);
+  if (status == Q16K_AITER_STATUS_OK) {
+    status = worker_q16k_aiter_dispatch_dense(
+        state, &queue_state, Q16K_DENSE_EMBEDDING, bindings, 4u, 0u, 0u);
+  }
   for (uint32_t layer = 0u;
        status == Q16K_AITER_STATUS_OK && layer < DEEPSEEK_LAYER_COUNT;
        ++layer) {
@@ -8077,7 +8445,43 @@ static loomc_status_t worker_q16k_aiter_suffix_forward(
         kv_last_page_lens, cu_seqlens_q, &layer_plan);
     if (status != Q16K_AITER_STATUS_OK) break;
     callback.status = Q16K_AITER_STATUS_OK;
-    status = q16k_aiter_enqueue_layer(&hook, &layer_plan, 0u);
+    if (state->q16k_full_model_sync_diagnostic.armed != 0u) {
+      q16k_full_model_sync_layer_record_t* record = NULL;
+      const q16k_full_model_sync_status_t record_status =
+          q16k_full_model_sync_begin_layer(
+              &state->q16k_full_model_sync_diagnostic,
+              state->active_position_base, query_count, layer, &record);
+      if (record_status != Q16K_FULL_MODEL_SYNC_OK) {
+        bound_worker_failure = true;
+        bound_worker_status = q16k_full_model_sync_diagnostic_to_status(
+            record_status, "layer record allocation");
+        status = Q16K_AITER_STATUS_CALLBACK_FAILED;
+        break;
+      }
+      deepseek_q16k_full_model_sync_context_t sync_context = {
+          .state = state,
+      };
+      const q16k_full_model_sync_ops_t sync_ops = {
+          .user_data = &sync_context,
+          .now_ns = worker_q16k_full_model_sync_now_ns,
+          .arm = worker_q16k_full_model_sync_arm,
+          .wait = worker_q16k_full_model_sync_wait,
+          .synchronize_cursor = worker_q16k_full_model_sync_cursor,
+          .pre_attention_publish =
+              worker_q16k_full_model_sync_pre_attention,
+          .post_attention_wait =
+              worker_q16k_full_model_sync_post_attention,
+      };
+      status = q16k_full_model_sync_enqueue_layer(
+          &hook, &layer_plan, state->dispatch_signal.handle, &sync_ops,
+          record);
+      if (sync_context.worker_failure) {
+        bound_worker_failure = true;
+        bound_worker_status = sync_context.worker_status;
+      }
+    } else {
+      status = q16k_aiter_enqueue_layer(&hook, &layer_plan, 0u);
+    }
     if (state->q16k_first_attention_diagnostic
             .attention_dispatch_captured != 0u) {
       hook.observe_attention = NULL;
@@ -8115,12 +8519,11 @@ static loomc_status_t worker_q16k_aiter_suffix_forward(
   if (status == Q16K_AITER_STATUS_OK) {
     status = q16k_aiter_flush_queue(&queue_state);
   }
-  q16k_queue_bridge_export(state, &queue_state);
-  q16k_dense_backend_unbind_queue(state->q16k_dense_backend,
-                                   &queue_state);
+  worker_q16k_finish_bound_queue(state, &queue_state);
   if (status != Q16K_AITER_STATUS_OK ||
       bridge.failure != DEEPSEEK_Q16K_QUEUE_FAILURE_NONE) {
     if (queue_state.kernarg_cursor != 0u) state->hsa_teardown_unsafe = true;
+    if (bound_worker_failure) return bound_worker_status;
     return q16k_aiter_to_worker_status(&bridge, status, "suffix prefill");
   }
   loomc_status_t wait_status = wait_for_completion(
@@ -17085,16 +17488,18 @@ static void q16k_host_test_ring_doorbell(void* user_data, void* queue,
 
 static void q16k_host_test_publish_packet(
     void* user_data, q16k_aiter_dispatch_packet_t* packet,
-    uint16_t dimensions) {
+    uint32_t full_header) {
   deepseek_q16k_host_queue_mock_t* mock =
       (deepseek_q16k_host_queue_mock_t*)user_data;
+  const uint32_t dimensions = (full_header >> 16) & UINT32_C(0x3);
   if (mock == NULL || packet == NULL || dimensions == 0u ||
-      dimensions > 3u) {
+      dimensions > 3u ||
+      (full_header & UINT32_C(0xffff)) != UINT32_C(0x1502)) {
     if (mock != NULL) mock->valid = false;
     return;
   }
   ++mock->publish_count;
-  packet->full_header = (uint32_t)(dimensions << 16) | UINT32_C(0x1502);
+  packet->full_header = full_header;
 }
 
 #define DEEPSEEK_DISPATCH_HOST_TEST_MAX_EVENTS 8u
@@ -17115,6 +17520,7 @@ typedef struct deepseek_dispatch_host_queue_mock_t {
   uint32_t store_count;
   uint32_t doorbell_count;
   uint32_t dispatch_signal_store_count;
+  uint32_t dispatch_signal_wake_count;
   uint32_t wait_count;
   bool valid;
 } deepseek_dispatch_host_queue_mock_t;
@@ -17174,8 +17580,14 @@ static void HSA_API dispatch_host_test_store_signal(
       return;
     }
     mock->doorbell_packets[mock->doorbell_count++] = (uint64_t)value;
-  } else if (signal.handle == mock->dispatch_signal.handle && value == 1) {
-    ++mock->dispatch_signal_store_count;
+  } else if (signal.handle == mock->dispatch_signal.handle) {
+    if (value == 1) {
+      ++mock->dispatch_signal_store_count;
+    } else if (value == 0) {
+      ++mock->dispatch_signal_wake_count;
+    } else {
+      mock->valid = false;
+    }
   } else {
     mock->valid = false;
   }
@@ -17414,6 +17826,26 @@ static bool validate_dispatch_queue_reservation_contract(void) {
          validate_dispatch_queue_invalid_batch();
 }
 
+static bool validate_queue_error_wakes_waiter(void) {
+  hsa_kernel_dispatch_packet_t packets[64] = {0};
+  _Alignas(16) uint8_t kernargs[Q16K_DENSE_ASM_KERNARG_STRIDE] = {0};
+  hsa_queue_t queue;
+  deepseek_state_t state;
+  deepseek_dispatch_host_queue_mock_t mock;
+  initialize_dispatch_host_test_state(&state, &queue, packets, kernargs,
+                                      &mock);
+  hsa_queue_error_callback(HSA_STATUS_ERROR, &queue, &state);
+  loomc_status_t status = wait_for_completion(
+      &state, state.dispatch_signal, true, "host queue-error wake test");
+  const bool failed = !loomc_status_is_ok(status);
+  if (!loomc_status_is_ok(status)) loomc_status_free(status);
+  deepseek_dispatch_host_queue_mock = NULL;
+  return failed && mock.valid && mock.dispatch_signal_wake_count == 1u &&
+         mock.wait_count == 1u && state.metrics.host_wait_count == 0u &&
+         atomic_load_explicit(&state.queue_error_status,
+                              memory_order_acquire) == HSA_STATUS_ERROR;
+}
+
 static bool validate_q16k_dense_hook_adapter_contract(void) {
   q16k_aiter_dispatch_packet_t packets[4] = {0};
   _Alignas(Q16K_AITER_KERNARG_ALIGNMENT)
@@ -17564,8 +17996,16 @@ static bool validate_q16k_dense_hook_adapter_contract(void) {
       packets[3].completion_signal != UINT64_C(0xbeef)) {
     return false;
   }
-  q16k_dense_backend_unbind_queue(&backend, &queue_state);
-  return backend.queue_state == NULL;
+  queue_state.deferred_queue_open = 1u;
+  queue_state.deferred_queue_write_index = 9u;
+  queue_state.deferred_queue_read_index = 4u;
+  queue_state.deferred_queue_pending_count = 5u;
+  worker_q16k_finish_bound_queue(&state, &queue_state);
+  return backend.queue_state == NULL && state.kernarg_cursor == 4u &&
+         state.deferred_queue_open &&
+         state.deferred_queue_write_index == 9u &&
+         state.deferred_queue_read_index == 4u &&
+         state.deferred_queue_pending_count == 5u;
 }
 
 static int run_host_self_test(void) {
@@ -17599,6 +18039,10 @@ static int run_host_self_test(void) {
   }
   if (!validate_dispatch_queue_reservation_contract()) {
     fprintf(stderr, "host self-test failed: dispatch queue reservation\n");
+    return 1;
+  }
+  if (!validate_queue_error_wakes_waiter()) {
+    fprintf(stderr, "host self-test failed: queue-error waiter wake\n");
     return 1;
   }
   loomc_status_t sha256_status = validate_sha256_implementation();
@@ -18726,6 +19170,79 @@ static loomc_status_t write_q16k_first_attention_diagnostic(
       state->q16k_first_attention_diagnostic_path, error_message);
 }
 
+static loomc_status_t capture_q16k_full_model_sync_runtime_layout(
+    deepseek_state_t* state) {
+  if (state == NULL || state->q16k_dense_backend == NULL ||
+      !state->q16k_dense_backend->initialized) {
+    return loomc_make_status(
+        LOOMC_STATUS_FAILED_PRECONDITION,
+        "q16K full-model diagnostic requires the initialized dense backend");
+  }
+  const q16k_aiter_allocation_plan_t* plan =
+      &state->q16k_aiter_allocation_plan;
+  const q16k_full_model_sync_runtime_layout_input_t layout = {
+      .metadata = {state->q16k_aiter_metadata_data,
+                   plan->attention_metadata_bytes},
+      .page_indices = {state->q16k_aiter_page_indices_data,
+                       plan->page_index_bytes},
+      .scratch = {state->scratch_data, state->scratch_size},
+      .loom_key = {state->long_key_cache_data,
+                   plan->loom_kv_allocation_bytes},
+      .loom_value = {state->long_value_cache_data,
+                     plan->loom_kv_allocation_bytes},
+      .shadow_key = {state->q16k_aiter_shadow_key_cache_data,
+                     plan->shadow_kv_allocation_bytes},
+      .shadow_value = {state->q16k_aiter_shadow_value_cache_data,
+                       plan->shadow_kv_allocation_bytes},
+      .rope = {state->rope_table_data, plan->rope_table_bytes},
+      .params = {state->params_data, 4u * sizeof(int32_t)},
+      .dense_workspace = {state->q16k_dense_backend->packed_qkv.data,
+                          state->q16k_dense_backend->packed_qkv.bytes},
+      .kernarg_ring = {state->kernarg_data, state->kernarg_size},
+  };
+  return q16k_full_model_sync_diagnostic_to_status(
+      q16k_full_model_sync_capture_runtime_layout(
+          &state->q16k_full_model_sync_diagnostic, &layout),
+      "runtime allocation capture");
+}
+
+static loomc_status_t write_q16k_full_model_sync_diagnostic(
+    deepseek_state_t* state, bool request_succeeded,
+    uint32_t generated_count) {
+  if (state->q16k_full_model_sync_diagnostic_path == NULL) {
+    return loomc_ok_status();
+  }
+  const bool final_token_captured = generated_count == 1u;
+  const int32_t final_token =
+      final_token_captured ? state->host_tokens[state->input_length] : -1;
+  q16k_full_model_sync_finish(
+      &state->q16k_full_model_sync_diagnostic,
+      request_succeeded ? 1u : 0u, final_token_captured ? 1u : 0u,
+      final_token, state->metrics.dispatch_count,
+      state->metrics.host_wait_count);
+  char error_message[512];
+  const q16k_full_model_sync_status_t diagnostic_status =
+      q16k_full_model_sync_write_json_atomic(
+          &state->q16k_full_model_sync_diagnostic,
+          state->q16k_full_model_sync_diagnostic_path, error_message,
+          sizeof(error_message));
+  if (diagnostic_status == Q16K_FULL_MODEL_SYNC_OK) {
+    return loomc_ok_status();
+  }
+  if (diagnostic_status == Q16K_FULL_MODEL_SYNC_INCOMPLETE) {
+    return DEEPSEEK_STATUS(
+        LOOMC_STATUS_FAILED_PRECONDITION,
+        "q16K full-model synchronization diagnostic was written but is "
+        "incomplete: %s",
+        state->q16k_full_model_sync_diagnostic_path);
+  }
+  return DEEPSEEK_STATUS(
+      LOOMC_STATUS_DATA_LOSS,
+      "q16K full-model synchronization diagnostic could not be written to "
+      "%s: %s",
+      state->q16k_full_model_sync_diagnostic_path, error_message);
+}
+
 static loomc_status_t run_protocol_server(deepseek_state_t* state,
                                            bool protocol_self_test,
                                            deepseek_experimental_mode_t mode) {
@@ -18778,11 +19295,12 @@ static loomc_status_t run_protocol_server(deepseek_state_t* state,
         read_protocol_line(stdin, line, sizeof(line));
     if (line_result == DEEPSEEK_PROTOCOL_LINE_READ_EOF) {
       if (!protocol_self_test &&
-          state->q16k_first_attention_diagnostic_path != NULL &&
+          (state->q16k_first_attention_diagnostic_path != NULL ||
+           state->q16k_full_model_sync_diagnostic_path != NULL) &&
           diagnostic_request_count != 1u) {
         return loomc_make_status(
             LOOMC_STATUS_FAILED_PRECONDITION,
-            "q16K first-attention diagnostic requires exactly one request");
+            "q16K diagnostic requires exactly one request");
       }
       return loomc_ok_status();
     }
@@ -18813,10 +19331,11 @@ static loomc_status_t run_protocol_server(deepseek_state_t* state,
                                  "writing protocol error failed");
       }
       if (!protocol_self_test &&
-          state->q16k_first_attention_diagnostic_path != NULL) {
+          (state->q16k_first_attention_diagnostic_path != NULL ||
+           state->q16k_full_model_sync_diagnostic_path != NULL)) {
         return loomc_make_status(
             LOOMC_STATUS_INVALID_ARGUMENT,
-            "q16K first-attention diagnostic request was rejected");
+            "q16K diagnostic request was rejected");
       }
       continue;
     }
@@ -18840,13 +19359,25 @@ static loomc_status_t run_protocol_server(deepseek_state_t* state,
       continue;
     }
 
-    if (state->q16k_first_attention_diagnostic_path != NULL) {
+    if (state->q16k_first_attention_diagnostic_path != NULL ||
+        state->q16k_full_model_sync_diagnostic_path != NULL) {
       diagnostic_request_count++;
       if (diagnostic_request_count != 1u) {
         return loomc_make_status(
             LOOMC_STATUS_FAILED_PRECONDITION,
-            "q16K first-attention diagnostic permits exactly one request");
+            "q16K diagnostic permits exactly one request");
       }
+    }
+    if (state->q16k_full_model_sync_diagnostic_path != NULL &&
+        (!action.batch_generate ||
+         action.input_count != Q16K_AITER_MAX_PROMPT_TOKEN_COUNT ||
+         action.output_count != 1u)) {
+      return loomc_make_status(
+          LOOMC_STATUS_FAILED_PRECONDITION,
+          "q16K full-model synchronization diagnostic requires one batched "
+          "131071+1 request");
+    }
+    if (state->q16k_first_attention_diagnostic_path != NULL) {
       q16k_first_attention_diagnostic_begin(
           &state->q16k_first_attention_diagnostic, action.request_id,
           diagnostic_request_count);
@@ -18871,6 +19402,13 @@ static loomc_status_t run_protocol_server(deepseek_state_t* state,
     const uint64_t request_start_ns = monotonic_now_ns();
     const uint64_t dispatch_start = state->metrics.dispatch_count;
     const uint64_t wait_start = state->metrics.host_wait_count;
+    if (state->q16k_full_model_sync_diagnostic_path != NULL) {
+      q16k_full_model_sync_begin(
+          &state->q16k_full_model_sync_diagnostic, action.request_id,
+          diagnostic_request_count, dispatch_start, wait_start);
+      LOOMC_RETURN_IF_ERROR(
+          capture_q16k_full_model_sync_runtime_layout(state));
+    }
     uint32_t generated_count = 0;
     loomc_status_t status = run_generation_once(
         state, false, !action.batch_generate, action.request_id,
@@ -18883,6 +19421,19 @@ static loomc_status_t run_protocol_server(deepseek_state_t* state,
       loomc_status_t diagnostic_status =
           write_q16k_first_attention_diagnostic(
               state, loomc_status_is_ok(status));
+      if (!loomc_status_is_ok(diagnostic_status)) {
+        if (loomc_status_is_ok(status)) {
+          status = diagnostic_status;
+        } else {
+          print_status(diagnostic_status);
+          loomc_status_free(diagnostic_status);
+        }
+      }
+    }
+    if (state->q16k_full_model_sync_diagnostic_path != NULL) {
+      loomc_status_t diagnostic_status =
+          write_q16k_full_model_sync_diagnostic(
+              state, loomc_status_is_ok(status), generated_count);
       if (!loomc_status_is_ok(diagnostic_status)) {
         if (loomc_status_is_ok(status)) {
           status = diagnostic_status;
@@ -18910,7 +19461,8 @@ static loomc_status_t run_protocol_server(deepseek_state_t* state,
       return loomc_make_status(LOOMC_STATUS_DATA_LOSS,
                                "writing completion response failed");
     }
-    if (state->q16k_first_attention_diagnostic_path != NULL) {
+    if (state->q16k_first_attention_diagnostic_path != NULL ||
+        state->q16k_full_model_sync_diagnostic_path != NULL) {
       return loomc_ok_status();
     }
   }
@@ -18990,6 +19542,10 @@ static loomc_status_t validate_strict_sglang_environment(
          (name_length ==
               strlen(DEEPSEEK_Q16K_FIRST_ATTENTION_DIAGNOSTIC_ENV) &&
           strncmp(*entry, DEEPSEEK_Q16K_FIRST_ATTENTION_DIAGNOSTIC_ENV,
+                  name_length) == 0) ||
+         (name_length ==
+              strlen(DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC_ENV) &&
+          strncmp(*entry, DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC_ENV,
                   name_length) == 0))) {
       continue;
     }
@@ -19672,6 +20228,37 @@ int main(int argc, char** argv) {
       fprintf(stderr, "%s refuses to overwrite %s\n",
               DEEPSEEK_Q16K_FIRST_ATTENTION_DIAGNOSTIC_ENV,
               q16k_first_attention_diagnostic);
+      return 1;
+    }
+  }
+  const char* q16k_full_model_sync_diagnostic =
+      getenv(DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC_ENV);
+  if (q16k_full_model_sync_diagnostic != NULL) {
+    if (!diagnostic_output_path_is_absolute(
+            q16k_full_model_sync_diagnostic)) {
+      fprintf(stderr, "%s must name an absolute output path\n",
+              DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC_ENV);
+      return 1;
+    }
+    if (!serve_stdio || !experiment_uses_q16k_aiter(experimental_mode)) {
+      fprintf(stderr,
+              "%s requires the q16K AITER stdio serving mode\n",
+              DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC_ENV);
+      return 1;
+    }
+    if (q16k_first_attention_diagnostic != NULL) {
+      fprintf(stderr, "%s cannot be combined with %s\n",
+              DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC_ENV,
+              DEEPSEEK_Q16K_FIRST_ATTENTION_DIAGNOSTIC_ENV);
+      return 1;
+    }
+    FILE* existing_diagnostic =
+        fopen(q16k_full_model_sync_diagnostic, "rb");
+    if (existing_diagnostic != NULL) {
+      fclose(existing_diagnostic);
+      fprintf(stderr, "%s refuses to overwrite %s\n",
+              DEEPSEEK_Q16K_FULL_MODEL_SYNC_DIAGNOSTIC_ENV,
+              q16k_full_model_sync_diagnostic);
       return 1;
     }
   }

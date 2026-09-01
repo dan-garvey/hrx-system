@@ -31,6 +31,8 @@ loom_cc_binary(
         "deepseek_r1.c",
         "diagnostics/first_attention/q16k_first_attention_diagnostic.c",
         "diagnostics/first_attention/q16k_first_attention_diagnostic.h",
+        "diagnostics/full_model_sync/q16k_full_model_sync_diagnostic.c",
+        "diagnostics/full_model_sync/q16k_full_model_sync_diagnostic.h",
         "q16k_aiter_integration.c",
         "q16k_aiter_integration.h",
         "q16k_dense_asm_contract.h",
@@ -43,6 +45,18 @@ loom_cc_binary(
         "//loom/binding/c/target/amdgpu",
         "//third_party:hsa_runtime_headers",
     ],
+)
+
+loom_cc_test(
+    name = "q16k_full_model_sync_diagnostic_test",
+    srcs = [
+        "diagnostics/full_model_sync/q16k_full_model_sync_diagnostic.c",
+        "diagnostics/full_model_sync/q16k_full_model_sync_diagnostic.h",
+        "diagnostics/full_model_sync/q16k_full_model_sync_diagnostic_test.c",
+        "q16k_aiter_integration.c",
+        "q16k_aiter_integration.h",
+    ],
+    tags = ["hostonly"],
 )
 
 loom_cc_test(

@@ -1566,17 +1566,8 @@ static void queue_ring_doorbell(void* user_data, void* queue,
 
 static void queue_publish_packet(void* user_data,
                                  q16k_aiter_dispatch_packet_t* packet,
-                                 uint16_t dimensions) {
+                                 uint32_t full_header) {
   queue_adapter_t* adapter = (queue_adapter_t*)user_data;
-  const uint16_t header = (uint16_t)(
-      (HSA_PACKET_TYPE_KERNEL_DISPATCH << HSA_PACKET_HEADER_TYPE) |
-      (1u << HSA_PACKET_HEADER_BARRIER) |
-      (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCACQUIRE_FENCE_SCOPE) |
-      (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCRELEASE_FENCE_SCOPE));
-  const uint16_t setup =
-      (uint16_t)(dimensions << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS);
-  const uint32_t full_header =
-      (uint32_t)header | ((uint32_t)setup << 16u);
   __atomic_store_n(&packet->full_header, full_header, __ATOMIC_RELEASE);
   memcpy(&adapter->published_packet, packet, sizeof(*packet));
   adapter->packet_published = true;

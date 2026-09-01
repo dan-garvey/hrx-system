@@ -1,6 +1,6 @@
 # q16K queue reservation provenance
 
-Generated: 2026-08-31T11:08:24Z
+Generated: 2026-09-01T01:50:44Z
 
 ## Authoritative source
 
@@ -9,13 +9,13 @@ Generated: 2026-08-31T11:08:24Z
 - Base commit: `a71eba3ab0ce320c0476712802332de124c9b88b`
 - Loom-owned worker: `loom/docs/examples/integration/deepseek-r1-distill-qwen-1.5b/amdgpu/deepseek_r1.c`
 
-Relative to that base commit, the tracked diff is confined to:
+The original queue repair changed these pre-existing tracked files:
 
 - `loom/binding/c/src/status.c`
 - `loom/binding/c/test/status_test.cc`
 
-The integration directory is the new, untracked Loom-owned source set. The
-expanded canonical seal is rooted at the repository root and contains its 18
+The integration directory is the Loom-owned source set. The expanded canonical
+seal is rooted at the repository root and contains 21 selected integration
 source members plus the two tracked status files above. Its `SHA256SUMS` paths
 are repository-relative, so verify it from the repository root with:
 
@@ -29,9 +29,10 @@ snapshot at
 `/home/dan/codex-work/deepseek-q16k-dense-rocr-v3-reflection-fix-20260831T045118Z/src/deepseek_r1_server.c`.
 Its SHA-256 before this fix was
 `a1268e037d23366d9695cb5aec9a203a4845f060e32a22216797cc2c4e0e2652`.
-The Loom-owned worker SHA-256 after the queue fix, first-attention diagnostic
-integration, and q16K system-fence correction is
-`6d68274fef66f5c97638cda905b333e06880fb0147b6ca3afc1e5f5cab0d097b`.
+The current Loom-owned worker SHA-256 after the queue fix, first-attention
+diagnostic integration, q16K system-fence correction, and full-model
+synchronization diagnostic is
+`b0231a6e2c8867789563de6c30f99361f86df36f576b8645fe562ec2b5362dbd`.
 
 The historical worker at
 `/home/dan/hrx-system-deepseek-r1/loom/docs/examples/integration/deepseek-r1-distill-qwen-1.5b/amdgpu/deepseek_r1.c`
@@ -47,12 +48,12 @@ The companion files had these hashes at import:
 - `q16k_aiter_integration.h`: `3f6672dc4b35c3e13b4b809cbf314b5c9fb828800a1fdec93ffafa15e9993ddb`
 - `q16k_dense_asm_contract.h`: `4c8d9914fe29031598d92f49a2cc970b50736b5a2525d87338c87ec34e238897`
 
-The schedule and dense ABI headers retain those imported hashes. The optional
-first-attention observer changed the integration module to these final hashes:
+The schedule and dense ABI headers retain those imported hashes. The current
+canonical integration files have these hashes:
 
-- `q16k_aiter_integration.c`: `5cc8b230e31a29ccadbab97fef50eb9842b36f78b51638aa2751d8ca95297182`
-- `q16k_aiter_integration.h`: `8f4c5664e94c7d011ef1e3f6a5f9ef186a374b710ca6655cba5877a46cd8d669`
-- `BUILD.bazel`: `89821cb54ea24e8712bac98911a3d48110a86579b0e1f0f3619bc435388b20b5`
+- `q16k_aiter_integration.c`: `e2212d8fe2a9110ec238c39e0a879f5b3cd0876b79c9af319f7a6d54ccf4fef3`
+- `q16k_aiter_integration.h`: `5d18e4503a3d4ec4bf37728a9f5c1d2470a6e8283ee2425cc0c07424f1dee4a4`
+- `BUILD.bazel`: `aa2c68c1b639ccaa4cdc7f8306db67dfde76d9de6b19e6c1224b4e587d2f8829`
 
 ## Failure and repair
 
@@ -93,6 +94,19 @@ fences, producing the low dispatch header `0x1502` and the three-dimensional
 all non-q16K dispatch paths retain agent-scope fences. The first-attention
 diagnostic mock, analyzer, tests, and documentation enforce the q16K value.
 
+## Full-model synchronization diagnostic
+
+The opt-in full-model diagnostic serializes each q16K pack and attention stage,
+captures the first layer's dispatch and allocation contracts, and snapshots
+metadata immediately before and after the first attention launch. Its v4
+record also retains the complete pre-attention output and reports host-side
+byte, BF16 element, query-row, head, and query-tile differences after the
+post-attention copy. Normal serving leaves the diagnostic unarmed.
+
+The implementation and host-only coverage live under
+`diagnostics/full_model_sync/`. All three source files are members of the
+repository-root canonical seal.
+
 ## Status message ownership repair
 
 `loomc_status_allocate` promises that message bytes are copied. The previous
@@ -111,6 +125,7 @@ The following commands passed from the repository root:
 bazel test --nocache_test_results --test_output=errors \
   //loom/docs/examples/integration/deepseek-r1-distill-qwen-1.5b/amdgpu:deepseek_r1_host_test \
   //loom/docs/examples/integration/deepseek-r1-distill-qwen-1.5b/amdgpu:q16k_first_attention_diagnostic_test \
+  //loom/docs/examples/integration/deepseek-r1-distill-qwen-1.5b/amdgpu:q16k_full_model_sync_diagnostic_test \
   //loom/docs/examples/integration/deepseek-r1-distill-qwen-1.5b/amdgpu:q16k_first_attention_tools_test
 bazel test --config=asan --nocache_test_results --test_output=errors \
   //loom/docs/examples/integration/deepseek-r1-distill-qwen-1.5b/amdgpu:deepseek_r1_host_test \
@@ -139,14 +154,14 @@ HSA, HIP, DRM, or ROCm path. `readelf -d` also found no HSA, HIP, or DRM dynamic
 dependency. No GPU or HSA execution was performed.
 
 The final normal Bazel worker has SHA-256
-`ee41ad4824f22c0baed680d92856c962e42547e99a7cf50718e7daeefefa97a1`
-and ELF build ID `4445bf76f728738a14d8b52e6d9dfd9a16ee0210`.
+`b813f84c85009a65f27538d133093374e0e87ac5f98554a8acfe3eb576314c3c`
+and ELF build ID `d4315bb261cb7896df55f6182fb7769c268a335b`.
 
 ## Ownership boundary
 
 This is Loom worker/runtime queue correctness and diagnostic work, not an
 external compute-kernel optimization. No llama.cpp, SGLang, AITER checkout,
 standalone ASM source, or Hyperloom source was modified. The sealed lineage
-snapshot remains unchanged; any deployment package is generated from these
-canonical Loom-owned bytes. Existing AITER code objects and ASM artifacts
-remain read-only external dependencies.
+snapshots used by completed experiments remain unchanged; new deployment
+packages are generated from these canonical Loom-owned bytes. Existing AITER
+code objects and ASM artifacts remain read-only external dependencies.
